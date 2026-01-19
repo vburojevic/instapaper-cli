@@ -1,0 +1,18 @@
+# Binaries
+/ip
+/ip.exe
+/bin/
+
+# Local config/state (created by the CLI)
+.config.json
+.state.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Go
+/vendor/
+*.test
+*.out
