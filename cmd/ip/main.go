@@ -653,6 +653,7 @@ func runAuth(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 }
 
 func runAuthLogin(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, cfgPath string, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("auth login", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -782,6 +783,7 @@ func runAuthLogin(ctx context.Context, args []string, opts *GlobalOptions, cfg *
 
 // --- bookmarks ---
 func runAdd(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -964,6 +966,7 @@ func runAdd(ctx context.Context, args []string, opts *GlobalOptions, cfg *config
 }
 
 func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -1083,6 +1086,7 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 }
 
 func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -1246,6 +1250,7 @@ type importItem struct {
 }
 
 func runImport(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -1529,6 +1534,7 @@ func listBookmarks(ctx context.Context, client *instapaper.Client, params listBo
 }
 
 func runProgress(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("progress", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -1584,6 +1590,7 @@ func runProgress(ctx context.Context, args []string, opts *GlobalOptions, cfg *c
 }
 
 func runBookmarkMutation(ctx context.Context, cmd string, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -1726,6 +1733,7 @@ func runMove(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 }
 
 func runDelete(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -1802,6 +1810,7 @@ func runDelete(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 }
 
 func runText(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("text", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -1955,6 +1964,7 @@ func runFolders(ctx context.Context, args []string, opts *GlobalOptions, cfg *co
 	case "delete":
 		fs := flag.NewFlagSet("folders delete", flag.ContinueOnError)
 		fs.SetOutput(stderr)
+		subArgs = reorderFlags(subArgs)
 		var help bool
 		var yes bool
 		var confirm string
@@ -2065,6 +2075,7 @@ func runHighlights(ctx context.Context, args []string, opts *GlobalOptions, cfg 
 	case "add":
 		fs := flag.NewFlagSet("highlights add", flag.ContinueOnError)
 		fs.SetOutput(stderr)
+		subArgs = reorderFlags(subArgs)
 		var help bool
 		var text string
 		var position int

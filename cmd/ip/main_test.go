@@ -242,3 +242,19 @@ func TestMoveAcceptsFlagsAfterPositional(t *testing.T) {
 		t.Fatalf("move with leading flag exit=%d err=%s", code, errOut)
 	}
 }
+
+func TestAddAcceptsFlagsAfterPositional(t *testing.T) {
+	args := append([]string{"ip"}, tempConfigArg(t)...)
+	code, _, errOut := runCmd(t, append(args, "--dry-run", "add", "https://example.com", "--title", "Example")...)
+	if code != 0 {
+		t.Fatalf("add with trailing flag exit=%d err=%s", code, errOut)
+	}
+}
+
+func TestProgressAcceptsFlagsAfterPositional(t *testing.T) {
+	args := append([]string{"ip"}, tempConfigArg(t)...)
+	code, _, errOut := runCmd(t, append(args, "--dry-run", "progress", "123", "--progress", "0.5", "--timestamp", "1700000000")...)
+	if code != 0 {
+		t.Fatalf("progress with trailing flags exit=%d err=%s", code, errOut)
+	}
+}
