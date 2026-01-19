@@ -3255,7 +3255,7 @@ func usageImport() string {
 }
 
 func usageBookmarkMutation(cmd string) string {
-	return fmt.Sprintf("Usage:\n  ip %s <bookmark_id> [<bookmark_id> ...] [--ids <ids>] [--stdin]\n", cmd)
+	return fmt.Sprintf("Usage:\n  ip %s <bookmark_id> [<bookmark_id> ...] [--ids <ids>] [--stdin] [--batch N] [--progress-json]\n", cmd)
 }
 
 func usageMove() string {
@@ -3263,7 +3263,7 @@ func usageMove() string {
 }
 
 func usageDelete() string {
-	return "Usage:\n  ip delete <bookmark_id> [--ids <ids>] [--stdin] --yes-really-delete|--confirm <bookmark_id>\n"
+	return "Usage:\n  ip delete <bookmark_id> [--ids <ids>] [--stdin] [--batch N] [--progress-json] --yes-really-delete|--confirm <bookmark_id>\n"
 }
 
 func usageProgress() string {

@@ -10,6 +10,7 @@ Features:
 - Highlights: list, add, delete
 - Health/verify checks, JSON schema output
 - NDJSON/JSON/plain output, structured stderr (`--stderr-json`), retries, dry-run, idempotent mode
+- Incremental sync (cursor files or bounds), bulk operations, and progress events
 
 ## Install
 
@@ -33,6 +34,15 @@ go build ./cmd/ip
 ```
 
 Release process: see `docs/release-checklist.md`.
+
+## Quickstart
+
+```bash
+export INSTAPAPER_CONSUMER_KEY="..."
+export INSTAPAPER_CONSUMER_SECRET="..."
+printf '%s' "your-password" | ./ip auth login --username "you@example.com" --password-stdin
+./ip list --ndjson --limit 10
+```
 
 ## Setup
 
@@ -120,6 +130,15 @@ Bounds format for `--since/--until`:
 - `time:<rfc3339|unix>`
 - `progress_timestamp:<rfc3339|unix>`
 
+## Output formats
+
+- `--ndjson` (default): one JSON object per line (stream-friendly).
+- `--json`: a single JSON array/object.
+- `--plain`: stable, tab-delimited text (for pipes).
+- `--format table`: human table (avoid for parsing).
+
+Use `--output <file>` to write results to a file. Use `-` for stdout.
+
 ## Mutations
 
 ```bash
@@ -201,6 +220,14 @@ printf "1\n2\n3\n" | ./ip text --stdin --out ./articles
 ./ip import --input bookmarks.ndjson --input-format ndjson --progress-json
 ```
 
+## Progress events (NDJSON)
+
+Use `--progress-json` to emit progress lines to stderr for long operations:
+
+```bash
+./ip import --input bookmarks.ndjson --input-format ndjson --progress-json
+```
+
 Write output to a file:
 
 ```bash
@@ -242,6 +269,14 @@ Examples:
 ./ip --json config show
 ./ip list --ndjson --limit 0
 ./ip list --plain --output bookmarks.txt
+```
+
+## Help
+
+```bash
+./ip --help
+./ip help list
+./ip help ai
 ```
 
 ## Environment variables
