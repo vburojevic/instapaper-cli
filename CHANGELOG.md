@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-01-19
+- Fix GoReleaser configuration for v2.
+
 ## [0.2.0] - 2026-01-19
 - Default output to NDJSON and add agent-focused help and docs.
 - Add list/export cursor support, fields selection, and NDJSON output tests.
