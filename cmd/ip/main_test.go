@@ -228,3 +228,17 @@ func TestFilterBookmarksBySelect(t *testing.T) {
 		t.Fatalf("unexpected select result: %+v", filtered)
 	}
 }
+
+func TestMoveAcceptsFlagsAfterPositional(t *testing.T) {
+	args := append([]string{"ip"}, tempConfigArg(t)...)
+
+	code, _, errOut := runCmd(t, append(args, "--dry-run", "move", "123", "--folder", "AI & Agents")...)
+	if code != 0 {
+		t.Fatalf("move with trailing flag exit=%d err=%s", code, errOut)
+	}
+
+	code, _, errOut = runCmd(t, append(args, "--dry-run", "move", "--folder", "AI & Agents", "123")...)
+	if code != 0 {
+		t.Fatalf("move with leading flag exit=%d err=%s", code, errOut)
+	}
+}
