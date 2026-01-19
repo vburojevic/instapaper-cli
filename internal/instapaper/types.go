@@ -151,10 +151,10 @@ type Bookmark struct {
 }
 
 type Folder struct {
-	Type     string `json:"type"`
-	FolderID Int64  `json:"folder_id"`
-	Title    string `json:"title"`
-	Position Int64  `json:"position,omitempty"`
+	Type     string  `json:"type"`
+	FolderID Int64   `json:"folder_id"`
+	Title    string  `json:"title"`
+	Position Float64 `json:"position,omitempty"`
 }
 
 type Highlight struct {

@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Fix folder position parsing (float positions) and allow flags after bookmark id for `move`.
 
 ## [0.2.3] - 2026-01-19
 - Skip Homebrew upload when tap token is missing.

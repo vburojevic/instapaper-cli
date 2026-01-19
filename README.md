@@ -155,7 +155,7 @@ Use `--verbose` to emit summary counts to stderr (keeps stdout clean).
 ./ip unarchive 123456
 ./ip star 123456
 ./ip unstar 123456
-./ip move 123456 --folder "Work"
+./ip move --folder "Work" 123456
 
 # Permanent delete (requires explicit flag)
 ./ip delete 123456 --yes-really-delete

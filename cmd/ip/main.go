@@ -528,6 +528,28 @@ func parseInt64(arg string) (int64, error) {
 	return v, nil
 }
 
+func reorderFlags(args []string) []string {
+	flags := []string{}
+	positionals := []string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			flags = append(flags, arg)
+			if !strings.Contains(arg, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				flags = append(flags, args[i+1])
+				i++
+			}
+			continue
+		}
+		positionals = append(positionals, arg)
+	}
+	return append(flags, positionals...)
+}
+
 func resolveListFolderID(ctx context.Context, client *instapaper.Client, folder string) (string, error) {
 	if folder == "" {
 		return "unread", nil
@@ -1650,6 +1672,7 @@ func runBookmarkMutation(ctx context.Context, cmd string, args []string, opts *G
 }
 
 func runMove(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("move", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var help bool
@@ -3630,7 +3653,7 @@ func usageBookmarkMutation(cmd string) string {
 }
 
 func usageMove() string {
-	return "Usage:\n  ip move <bookmark_id> --folder <folder_id|\"Title\">\n"
+	return "Usage:\n  ip move --folder <folder_id|\"Title\"> <bookmark_id>\n"
 }
 
 func usageDelete() string {

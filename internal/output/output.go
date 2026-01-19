@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -110,14 +111,14 @@ func PrintFolders(w io.Writer, format string, folders []instapaper.Folder) error
 		return nil
 	case strings.EqualFold(format, "plain"):
 		for _, f := range folders {
-			fmt.Fprintf(w, "%d\t%d\t%s\n", int64(f.FolderID), int64(f.Position), oneLine(f.Title))
+			fmt.Fprintf(w, "%d\t%s\t%s\n", int64(f.FolderID), formatPosition(f.Position), oneLine(f.Title))
 		}
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tPOSITION\tTITLE")
 	for _, f := range folders {
-		fmt.Fprintf(tw, "%d\t%d\t%s\n", int64(f.FolderID), int64(f.Position), truncateOneLine(f.Title, 80))
+		fmt.Fprintf(tw, "%d\t%s\t%s\n", int64(f.FolderID), formatPosition(f.Position), truncateOneLine(f.Title, 80))
 	}
 	return tw.Flush()
 }
@@ -176,6 +177,10 @@ func oneLine(s string) string {
 
 func isNDJSON(format string) bool {
 	return strings.EqualFold(format, "ndjson") || strings.EqualFold(format, "jsonl")
+}
+
+func formatPosition(pos instapaper.Float64) string {
+	return strconv.FormatFloat(float64(pos), 'f', -1, 64)
 }
 
 func parseFields(fieldsCSV string) ([]string, error) {
