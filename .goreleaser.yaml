@@ -1,0 +1,53 @@
+project_name: instapaper-cli
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ip
+    main: ./cmd/ip
+    binary: ip
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/vburojevic/instapaper-cli/internal/version.Version={{.Version}}
+      - -X github.com/vburojevic/instapaper-cli/internal/version.Commit={{.Commit}}
+      - -X github.com/vburojevic/instapaper-cli/internal/version.Date={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+brews:
+  - name: instapaper-cli
+    folder: Formula
+    homepage: https://github.com/vburojevic/instapaper-cli
+    description: Dependency-free Instapaper CLI
+    license: MIT
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com
+    tap:
+      owner: vburojevic
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    install: |
+      bin.install "ip"
+    test: |
+      system "#{bin}/ip", "--version"
+
+release:
+  prerelease: false
+
+changelog:
+  use: github

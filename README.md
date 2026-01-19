@@ -16,6 +16,13 @@ go install github.com/vburojevic/instapaper-cli/cmd/ip@latest
 ip version
 ```
 
+Homebrew (via tap):
+
+```bash
+brew tap vburojevic/tap
+brew install instapaper-cli
+```
+
 Or build from source:
 
 ```bash
