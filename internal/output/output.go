@@ -16,6 +16,12 @@ func WriteJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+func WriteJSONLine(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
 func PrintBookmarks(w io.Writer, format string, bookmarks []instapaper.Bookmark) error {
 	switch {
 	case strings.EqualFold(format, "json"):
@@ -61,6 +67,30 @@ func PrintBookmarks(w io.Writer, format string, bookmarks []instapaper.Bookmark)
 		fmt.Fprintf(tw, "%d\t%s\t%.2f\t%s\t%s\n", int64(b.BookmarkID), star, prog, title, url)
 	}
 	return tw.Flush()
+}
+
+func PrintBookmarksWithFields(w io.Writer, format string, bookmarks []instapaper.Bookmark, fieldsCSV string) error {
+	fields, err := parseFields(fieldsCSV)
+	if err != nil {
+		return err
+	}
+	records := make([]map[string]any, 0, len(bookmarks))
+	for _, b := range bookmarks {
+		records = append(records, filterFields(bookmarkToMap(b), fields))
+	}
+	switch {
+	case strings.EqualFold(format, "json"):
+		return WriteJSON(w, records)
+	case isNDJSON(format):
+		for _, rec := range records {
+			if err := WriteJSONLine(w, rec); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("fields are only supported for json/ndjson output")
+	}
 }
 
 func PrintFolders(w io.Writer, format string, folders []instapaper.Folder) error {
@@ -146,4 +176,66 @@ func oneLine(s string) string {
 
 func isNDJSON(format string) bool {
 	return strings.EqualFold(format, "ndjson") || strings.EqualFold(format, "jsonl")
+}
+
+func parseFields(fieldsCSV string) ([]string, error) {
+	if strings.TrimSpace(fieldsCSV) == "" {
+		return nil, nil
+	}
+	raw := strings.Split(fieldsCSV, ",")
+	fields := make([]string, 0, len(raw))
+	seen := map[string]bool{}
+	for _, f := range raw {
+		f = strings.ToLower(strings.TrimSpace(f))
+		if f == "" {
+			continue
+		}
+		if !isAllowedField(f) {
+			return nil, fmt.Errorf("unknown field: %s", f)
+		}
+		if !seen[f] {
+			fields = append(fields, f)
+			seen[f] = true
+		}
+	}
+	return fields, nil
+}
+
+func isAllowedField(field string) bool {
+	switch field {
+	case "type", "bookmark_id", "url", "title", "description", "hash", "progress", "progress_timestamp", "starred", "private_source", "time", "tags":
+		return true
+	default:
+		return false
+	}
+}
+
+func bookmarkToMap(b instapaper.Bookmark) map[string]any {
+	return map[string]any{
+		"type":               b.Type,
+		"bookmark_id":        int64(b.BookmarkID),
+		"url":                b.URL,
+		"title":              b.Title,
+		"description":        b.Description,
+		"hash":               b.Hash,
+		"progress":           float64(b.Progress),
+		"progress_timestamp": int64(b.ProgressTimestamp),
+		"starred":            bool(b.Starred),
+		"private_source":     b.PrivateSource,
+		"time":               int64(b.Time),
+		"tags":               b.Tags,
+	}
+}
+
+func filterFields(m map[string]any, fields []string) map[string]any {
+	if len(fields) == 0 {
+		return m
+	}
+	out := make(map[string]any, len(fields))
+	for _, f := range fields {
+		if v, ok := m[f]; ok {
+			out[f] = v
+		}
+	}
+	return out
 }

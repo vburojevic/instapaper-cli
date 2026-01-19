@@ -103,7 +103,7 @@ func TestConfigShowTable(t *testing.T) {
 	cfg.ConsumerSecret = "cs"
 	writeConfig(t, cfgPath, cfg)
 
-	code, out, _ := runCmd(t, "ip", "--config", cfgPath, "config", "show")
+	code, out, _ := runCmd(t, "ip", "--config", cfgPath, "--format", "table", "config", "show")
 	if code != 0 {
 		t.Fatalf("config show exit=%d", code)
 	}
@@ -138,6 +138,17 @@ func TestAuthStatusJSON(t *testing.T) {
 	}
 	if !strings.Contains(out, "\"logged_in\"") {
 		t.Fatalf("expected json output, got: %s", out)
+	}
+}
+
+func TestStderrJSON(t *testing.T) {
+	args := append([]string{"ip"}, tempConfigArg(t)...)
+	code, _, errOut := runCmd(t, append(args, "--stderr-json", "--format", "table", "list", "--limit", "-1")...)
+	if code == 0 {
+		t.Fatalf("expected error exit code")
+	}
+	if !strings.Contains(errOut, "\"error\"") {
+		t.Fatalf("expected json error on stderr, got: %s", errOut)
 	}
 }
 

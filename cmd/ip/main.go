@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -24,12 +27,46 @@ import (
 )
 
 type GlobalOptions struct {
-	ConfigPath string
-	Format     string
-	Quiet      bool
-	Debug      bool
-	Timeout    time.Duration
-	APIBase    string
+	ConfigPath   string
+	Format       string
+	Quiet        bool
+	Debug        bool
+	DebugJSON    bool
+	Timeout      time.Duration
+	APIBase      string
+	OutputPath   string
+	StderrJSON   bool
+	RetryCount   int
+	RetryBackoff time.Duration
+	DryRun       bool
+	Idempotent   bool
+}
+
+var stderrJSONEnabled bool
+
+type durationFlag struct {
+	value *time.Duration
+	set   bool
+}
+
+func (d *durationFlag) String() string {
+	if d == nil || d.value == nil {
+		return ""
+	}
+	return d.value.String()
+}
+
+func (d *durationFlag) Set(s string) error {
+	if d == nil || d.value == nil {
+		return errors.New("duration flag not initialized")
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*d.value = v
+	d.set = true
+	return nil
 }
 
 func main() {
@@ -46,16 +83,26 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	var plainOutput bool
 	var ndjsonOutput bool
 	var jsonlOutput bool
+	var timeoutFlag durationFlag
+	opts.Timeout = 15 * time.Second
+	timeoutFlag.value = &opts.Timeout
 	global.StringVar(&opts.ConfigPath, "config", "", "Path to config file (default: user config dir)")
-	global.StringVar(&opts.Format, "format", "", "Output format: table, plain, or json")
+	global.StringVar(&opts.Format, "format", "", "Output format: table, plain, json, or ndjson")
 	global.BoolVar(&opts.Quiet, "quiet", false, "Less output")
 	global.BoolVar(&opts.Debug, "debug", false, "Debug output (never prints secrets)")
-	global.DurationVar(&opts.Timeout, "timeout", 15*time.Second, "HTTP timeout")
+	global.BoolVar(&opts.DebugJSON, "debug-json", false, "Debug output as JSON lines")
+	global.Var(&timeoutFlag, "timeout", "HTTP timeout")
 	global.StringVar(&opts.APIBase, "api-base", "", "API base URL (default: https://www.instapaper.com)")
 	global.BoolVar(&jsonOutput, "json", false, "Output JSON (alias for --format json)")
 	global.BoolVar(&plainOutput, "plain", false, "Output plain text (alias for --format plain)")
 	global.BoolVar(&ndjsonOutput, "ndjson", false, "Output NDJSON (alias for --format ndjson)")
 	global.BoolVar(&jsonlOutput, "jsonl", false, "Output NDJSON (alias for --format ndjson)")
+	global.StringVar(&opts.OutputPath, "output", "", "Write output to file ('-' for stdout)")
+	global.BoolVar(&opts.StderrJSON, "stderr-json", false, "Emit errors as JSON on stderr")
+	global.IntVar(&opts.RetryCount, "retry", 0, "Retry count for transient errors")
+	global.DurationVar(&opts.RetryBackoff, "retry-backoff", 500*time.Millisecond, "Retry backoff base duration")
+	global.BoolVar(&opts.DryRun, "dry-run", false, "Preview actions without making changes")
+	global.BoolVar(&opts.Idempotent, "idempotent", false, "Ignore already-in-state errors when possible")
 	global.BoolVar(&showVersion, "version", false, "Show version")
 	global.BoolVar(&help, "help", false, "Show help")
 	global.BoolVar(&help, "h", false, "Show help")
@@ -64,6 +111,19 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	if err := global.Parse(argv[1:]); err != nil {
 		return 2
 	}
+	if !timeoutFlag.set {
+		if env := os.Getenv("INSTAPAPER_TIMEOUT"); env != "" {
+			d, err := time.ParseDuration(env)
+			if err != nil {
+				return printUsageError(stderr, fmt.Sprintf("invalid INSTAPAPER_TIMEOUT: %v", err))
+			}
+			opts.Timeout = d
+		}
+	}
+	if opts.DebugJSON {
+		opts.Debug = true
+	}
+	stderrJSONEnabled = opts.StderrJSON
 	if help {
 		fmt.Fprintln(stdout, usageRoot())
 		return 0
@@ -103,7 +163,7 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		if cfg.Defaults.Format != "" {
 			opts.Format = cfg.Defaults.Format
 		} else {
-			opts.Format = "table"
+			opts.Format = "ndjson"
 		}
 	}
 	if jsonOutput {
@@ -116,8 +176,18 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		opts.Format = "ndjson"
 	}
 	if err := validateFormat(opts.Format); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 2
+		return printUsageError(stderr, err.Error())
+	}
+
+	if opts.OutputPath != "" {
+		out, closeFn, err := openOutputWriter(opts.OutputPath, stdout)
+		if err != nil {
+			return printError(stderr, err)
+		}
+		if closeFn != nil {
+			defer closeFn()
+		}
+		stdout = out
 	}
 
 	ctx := context.Background()
@@ -138,6 +208,10 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		return runAdd(ctx, cmdArgs, &opts, cfg, stdout, stderr)
 	case "list":
 		return runList(ctx, cmdArgs, &opts, cfg, stdout, stderr)
+	case "export":
+		return runExport(ctx, cmdArgs, &opts, cfg, stdout, stderr)
+	case "import":
+		return runImport(ctx, cmdArgs, &opts, cfg, stdout, stderr)
 	case "progress":
 		return runProgress(ctx, cmdArgs, &opts, cfg, stdout, stderr)
 	case "archive", "unarchive", "star", "unstar":
@@ -152,7 +226,18 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		return runFolders(ctx, cmdArgs, &opts, cfg, stdout, stderr)
 	case "highlights":
 		return runHighlights(ctx, cmdArgs, &opts, cfg, stdout, stderr)
+	case "health":
+		return runHealth(ctx, &opts, cfg, stdout, stderr)
+	case "verify":
+		return runVerify(ctx, &opts, cfg, stdout, stderr)
+	case "schema":
+		return runSchema(cmdArgs, &opts, stdout, stderr)
+	case "tags":
+		return runTags(cmdArgs, stdout, stderr)
 	default:
+		if stderrJSONEnabled {
+			return printUsageError(stderr, fmt.Sprintf("unknown command: %s", cmd))
+		}
 		fmt.Fprintf(stderr, "unknown command: %s\n\n", cmd)
 		fmt.Fprintln(stderr, usageRoot())
 		return 2
@@ -172,25 +257,34 @@ func usageRoot() string {
 
 Global flags:
   --config <path>       Override config path
-  --format table|plain|json   Output format (default from config or table)
+  --format table|plain|json|ndjson   Output format (default from config or ndjson)
   --json                Output JSON (alias for --format json)
   --plain               Output plain text (alias for --format plain)
   --ndjson              Output NDJSON (alias for --format ndjson)
   --jsonl               Output NDJSON (alias for --format ndjson)
+  --output <file>       Write output to file ('-' for stdout)
+  --stderr-json         Emit errors as JSON on stderr
   --timeout 15s         HTTP timeout
+  --retry N             Retry count for transient errors
+  --retry-backoff 500ms Retry backoff base duration
   --api-base <url>      API base URL (default https://www.instapaper.com)
   --debug               Debug output
+  --debug-json          Debug output as JSON lines
   --quiet               Less output
+  --dry-run             Preview actions without making changes
+  --idempotent          Ignore already-in-state errors when possible
   -h, --help            Show help
   --version             Show version
 
 Commands:
   help [command]
   version
-  config path|show
+  config path|show|get|set|unset
   auth login|status|logout
   add <url|-> [--folder <id|"Title">] [--title ...] [--tags "a,b"]
-  list [--folder unread|starred|archive|<id>|"Title"] [--limit N] [--tag name] [--have ...] [--highlights ...] [--output <file>]
+  list [--folder unread|starred|archive|<id>|"Title"] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>]
+  export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>]
+  import [--input-format plain|csv|ndjson] [--input <file>|-]
   help ai|agent
   progress <bookmark_id> --progress <0..1> --timestamp <unix>
   archive <bookmark_id>
@@ -202,6 +296,10 @@ Commands:
   text <bookmark_id> [--out <file>] [--open]
   folders list|add|delete|order
   highlights list|add|delete
+  health
+  verify
+  schema [bookmarks|folders|highlights|auth|config]
+  tags list|rename|delete
 `
 }
 
@@ -223,6 +321,10 @@ func runHelp(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, usageAdd())
 	case "list":
 		fmt.Fprintln(stdout, usageList())
+	case "export":
+		fmt.Fprintln(stdout, usageExport())
+	case "import":
+		fmt.Fprintln(stdout, usageImport())
 	case "archive":
 		fmt.Fprintln(stdout, usageBookmarkMutation("archive"))
 	case "unarchive":
@@ -245,7 +347,18 @@ func runHelp(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, usageHighlights())
 	case "ai", "agent":
 		fmt.Fprintln(stdout, usageAgent())
+	case "health":
+		fmt.Fprintln(stdout, usageHealth())
+	case "verify":
+		fmt.Fprintln(stdout, usageVerify())
+	case "schema":
+		fmt.Fprintln(stdout, usageSchema())
+	case "tags":
+		fmt.Fprintln(stdout, usageTags())
 	default:
+		if stderrJSONEnabled {
+			return printUsageError(stderr, fmt.Sprintf("unknown command: %s", args[0]))
+		}
 		fmt.Fprintf(stderr, "unknown command: %s\n\n", args[0])
 		fmt.Fprintln(stderr, usageRoot())
 		return 2
@@ -260,8 +373,7 @@ func runConfig(args []string, cfgPath string, opts *GlobalOptions, stdout, stder
 		return 0
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: ip config path|show")
-		return 2
+		return printUsageError(stderr, "usage: ip config path|show|get|set|unset")
 	}
 	switch args[0] {
 	case "path":
@@ -272,19 +384,96 @@ func runConfig(args []string, cfgPath string, opts *GlobalOptions, stdout, stder
 		if err != nil {
 			return printError(stderr, err)
 		}
-		if opts != nil && strings.EqualFold(opts.Format, "json") {
-			if err := output.WriteJSON(stdout, cfg); err != nil {
-				return printError(stderr, err)
+		if opts != nil {
+			switch {
+			case strings.EqualFold(opts.Format, "json"):
+				if err := output.WriteJSON(stdout, cfg); err != nil {
+					return printError(stderr, err)
+				}
+				return 0
+			case isNDJSONFormat(opts.Format):
+				if err := output.WriteJSONLine(stdout, cfg); err != nil {
+					return printError(stderr, err)
+				}
+				return 0
+			case strings.EqualFold(opts.Format, "plain"):
+				if err := printConfigPlain(stdout, cfg); err != nil {
+					return printError(stderr, err)
+				}
+				return 0
 			}
-			return 0
 		}
 		if err := printConfig(stdout, cfg); err != nil {
 			return printError(stderr, err)
 		}
 		return 0
+	case "get":
+		if len(args) != 2 {
+			return printUsageError(stderr, "usage: ip config get <key>")
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			return printError(stderr, err)
+		}
+		val, ok, err := configGet(cfg, args[1])
+		if err != nil {
+			return printError(stderr, err)
+		}
+		if !ok {
+			return printError(stderr, fmt.Errorf("unknown config key: %s", args[1]))
+		}
+		if strings.EqualFold(opts.Format, "json") {
+			if err := output.WriteJSON(stdout, map[string]any{"key": args[1], "value": val}); err != nil {
+				return printError(stderr, err)
+			}
+			return 0
+		}
+		if isNDJSONFormat(opts.Format) {
+			if err := output.WriteJSONLine(stdout, map[string]any{"key": args[1], "value": val}); err != nil {
+				return printError(stderr, err)
+			}
+			return 0
+		}
+		fmt.Fprintf(stdout, "%s=%v\n", args[1], val)
+		return 0
+	case "set":
+		if len(args) != 3 {
+			return printUsageError(stderr, "usage: ip config set <key> <value>")
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			return printError(stderr, err)
+		}
+		if err := configSet(cfg, args[1], args[2]); err != nil {
+			return printError(stderr, err)
+		}
+		if err := cfg.Save(cfgPath); err != nil {
+			return printError(stderr, err)
+		}
+		if !opts.Quiet {
+			fmt.Fprintf(stdout, "Set %s\n", args[1])
+		}
+		return 0
+	case "unset":
+		if len(args) != 2 {
+			return printUsageError(stderr, "usage: ip config unset <key>")
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			return printError(stderr, err)
+		}
+		if err := configUnset(cfg, args[1]); err != nil {
+			return printError(stderr, err)
+		}
+		if err := cfg.Save(cfgPath); err != nil {
+			return printError(stderr, err)
+		}
+		if !opts.Quiet {
+			fmt.Fprintf(stdout, "Unset %s\n", args[1])
+		}
+		return 0
 	default:
-		fmt.Fprintln(stderr, "usage: ip config path|show")
-		return 2
+		return printUsageError(stderr, "usage: ip config path|show|get|set|unset")
 	}
 }
 
@@ -317,8 +506,13 @@ func requireClient(opts *GlobalOptions, cfg *config.Config, requireAuth bool, st
 	if err != nil {
 		return nil, "", "", err
 	}
-	if opts.Debug {
+	if opts.DebugJSON {
+		client.EnableDebugJSON(stderr)
+	} else if opts.Debug {
 		client.EnableDebug(stderr)
+	}
+	if opts.RetryCount > 0 {
+		client.SetRetry(opts.RetryCount, opts.RetryBackoff)
 	}
 	return client, ck, cs, nil
 }
@@ -386,12 +580,11 @@ func runAuth(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 		return 0
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: ip auth login|status|logout")
-		return 2
+		return printUsageError(stderr, "usage: ip auth login|status|logout")
 	}
 	switch args[0] {
 	case "status":
-		if strings.EqualFold(opts.Format, "json") {
+		if strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format) {
 			payload := map[string]any{
 				"logged_in": cfg.HasAuth(),
 			}
@@ -400,6 +593,12 @@ func runAuth(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 					"user_id":  cfg.User.UserID,
 					"username": cfg.User.Username,
 				}
+			}
+			if isNDJSONFormat(opts.Format) {
+				if err := output.WriteJSONLine(stdout, payload); err != nil {
+					return printError(stderr, err)
+				}
+				return 0
 			}
 			if err := output.WriteJSON(stdout, payload); err != nil {
 				return printError(stderr, err)
@@ -422,8 +621,7 @@ func runAuth(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	case "login":
 		return runAuthLogin(ctx, args[1:], opts, cfg, cfgPath, stdout, stderr)
 	default:
-		fmt.Fprintln(stderr, "usage: ip auth login|status|logout")
-		return 2
+		return printUsageError(stderr, "usage: ip auth login|status|logout")
 	}
 }
 
@@ -466,15 +664,13 @@ func runAuthLogin(ctx context.Context, args []string, opts *GlobalOptions, cfg *
 		}
 	}
 	if consumerKey == "" || consumerSecret == "" {
-		fmt.Fprintln(stderr, "error: missing consumer key/secret (set env INSTAPAPER_CONSUMER_KEY/INSTAPAPER_CONSUMER_SECRET or pass flags)")
-		return 1
+		return printError(stderr, errors.New("missing consumer key/secret (set env INSTAPAPER_CONSUMER_KEY/INSTAPAPER_CONSUMER_SECRET or pass flags)"))
 	}
 
 	interactive := isTTY(os.Stdin)
 	if username == "" {
 		if noInput || !interactive {
-			fmt.Fprintln(stderr, "error: missing --username (stdin is not a TTY)")
-			return 2
+			return printUsageError(stderr, "missing --username (stdin is not a TTY)")
 		}
 		u, err := prompt.ReadLine(os.Stdin, stderr, "Email or username: ")
 		if err != nil {
@@ -486,8 +682,7 @@ func runAuthLogin(ctx context.Context, args []string, opts *GlobalOptions, cfg *
 	var password string
 	if passwordStdin {
 		if isTTY(os.Stdin) {
-			fmt.Fprintln(stderr, "error: --password-stdin requires piped input (stdin is a TTY)")
-			return 2
+			return printUsageError(stderr, "--password-stdin requires piped input (stdin is a TTY)")
 		}
 		b, err := io.ReadAll(os.Stdin)
 		if err != nil {
@@ -496,8 +691,7 @@ func runAuthLogin(ctx context.Context, args []string, opts *GlobalOptions, cfg *
 		password = strings.TrimSpace(string(b))
 	} else {
 		if noInput || !interactive {
-			fmt.Fprintln(stderr, "error: missing password; use --password-stdin or run interactively")
-			return 2
+			return printUsageError(stderr, "missing password; use --password-stdin or run interactively")
 		}
 		pw, err := prompt.ReadPassword(stderr, "Password, if you have one: ", os.Stdin)
 		if err != nil {
@@ -510,8 +704,13 @@ func runAuthLogin(ctx context.Context, args []string, opts *GlobalOptions, cfg *
 	if err != nil {
 		return printError(stderr, err)
 	}
-	if opts.Debug {
+	if opts.DebugJSON {
+		client.EnableDebugJSON(stderr)
+	} else if opts.Debug {
 		client.EnableDebug(stderr)
+	}
+	if opts.RetryCount > 0 {
+		client.SetRetry(opts.RetryCount, opts.RetryBackoff)
 	}
 	ok, sk, err := client.XAuthAccessToken(ctx, username, password)
 	// Discard password ASAP.
@@ -532,8 +731,13 @@ func runAuthLogin(ctx context.Context, args []string, opts *GlobalOptions, cfg *
 	if err != nil {
 		return printError(stderr, err)
 	}
-	if opts.Debug {
+	if opts.DebugJSON {
+		client2.EnableDebugJSON(stderr)
+	} else if opts.Debug {
 		client2.EnableDebug(stderr)
+	}
+	if opts.RetryCount > 0 {
+		client2.SetRetry(opts.RetryCount, opts.RetryBackoff)
 	}
 	u, err := client2.VerifyCredentials(ctx)
 	if err != nil {
@@ -593,20 +797,9 @@ func runAdd(ctx context.Context, args []string, opts *GlobalOptions, cfg *config
 	}
 	remaining := fs.Args()
 	if len(remaining) != 1 {
-		fmt.Fprintln(stderr, "usage: ip add <url|-> [flags]")
-		return 2
+		return printUsageError(stderr, "usage: ip add <url|-> [flags]")
 	}
 	urlArg := remaining[0]
-
-	client, _, _, err := requireClient(opts, cfg, true, stderr)
-	if err != nil {
-		return printError(stderr, err)
-	}
-
-	folderID, err := resolveUserFolderID(ctx, client, folder)
-	if err != nil {
-		return printError(stderr, err)
-	}
 
 	var content string
 	if contentFile != "" {
@@ -620,6 +813,48 @@ func runAdd(ctx context.Context, args []string, opts *GlobalOptions, cfg *config
 	resolveFinalURL := cfg.Defaults.ResolveFinalURLValue()
 	if resolveFinalSet {
 		resolveFinalURL = resolveFinal
+	}
+	if opts.DryRun {
+		records := []map[string]any{}
+		addRecord := func(u string) {
+			records = append(records, map[string]any{
+				"url":               u,
+				"title":             title,
+				"description":       desc,
+				"folder":            folder,
+				"archive":           archive,
+				"tags":              strings.Split(strings.TrimSpace(tags), ","),
+				"resolve_final_url": resolveFinalURL,
+				"content_file":      contentFile,
+				"private_source":    privateSource,
+			})
+		}
+		if urlArg == "-" {
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				u := strings.TrimSpace(scanner.Text())
+				if u == "" {
+					continue
+				}
+				addRecord(u)
+			}
+			if err := scanner.Err(); err != nil {
+				return printError(stderr, err)
+			}
+		} else {
+			addRecord(urlArg)
+		}
+		return emitDryRunRecords(stdout, opts.Format, "add", records)
+	}
+
+	client, _, _, err := requireClient(opts, cfg, true, stderr)
+	if err != nil {
+		return printError(stderr, err)
+	}
+
+	folderID, err := resolveUserFolderID(ctx, client, folder)
+	if err != nil {
+		return printError(stderr, err)
 	}
 
 	makeReq := func(u string) instapaper.AddBookmarkRequest {
@@ -676,7 +911,7 @@ func runAdd(ctx context.Context, args []string, opts *GlobalOptions, cfg *config
 				if code > exit {
 					exit = code
 				}
-				fmt.Fprintf(stderr, "error adding %s: %v\n", u, err)
+				writeErrorLine(stderr, fmt.Errorf("adding %s: %v", u, err))
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -700,7 +935,8 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	var tag string
 	var have string
 	var highlights string
-	var outputPath string
+	var fields string
+	var cursorPath string
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.StringVar(&folder, "folder", "unread", "Folder: unread|starred|archive|<id>|\"Title\"")
@@ -708,13 +944,21 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	fs.StringVar(&tag, "tag", "", "Tag name (when provided, folder is ignored)")
 	fs.StringVar(&have, "have", "", "Comma-separated IDs to exclude (id:progress:timestamp)")
 	fs.StringVar(&highlights, "highlights", "", "Comma-separated bookmark IDs for highlights")
-	fs.StringVar(&outputPath, "output", "", "Write output to file ('-' for stdout)")
+	fs.StringVar(&fields, "fields", "", "Comma-separated fields (json/ndjson only)")
+	fs.StringVar(&cursorPath, "cursor", "", "Path to cursor file for incremental sync")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if help {
 		printFlagUsage(stdout, usageList(), fs)
 		return 0
+	}
+
+	if limit < 0 || limit > 500 {
+		return printUsageError(stderr, fmt.Sprintf("invalid --limit %d (expected 0..500)", limit))
+	}
+	if fields != "" && !strings.EqualFold(opts.Format, "json") && !isNDJSONFormat(opts.Format) {
+		return printUsageError(stderr, "--fields requires --json or --ndjson output")
 	}
 
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
@@ -730,30 +974,367 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 		}
 	}
 
-	resp, err := client.ListBookmarks(ctx, instapaper.ListBookmarksOptions{
+	resp, err := listBookmarks(ctx, client, listBookmarksParams{
 		Limit:      limit,
 		FolderID:   folderID,
 		Tag:        tag,
 		Have:       have,
 		Highlights: highlights,
+		Fields:     fields,
+		CursorPath: cursorPath,
 	})
 	if err != nil {
 		return printError(stderr, err)
 	}
-	out, closeFn, err := openOutputWriter(outputPath, stdout)
+	if fields != "" && (strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format)) {
+		if err := output.PrintBookmarksWithFields(stdout, opts.Format, resp.Bookmarks, fields); err != nil {
+			return printError(stderr, err)
+		}
+		return 0
+	}
+	if err := output.PrintBookmarks(stdout, opts.Format, resp.Bookmarks); err != nil {
+		return printError(stderr, err)
+	}
+	return 0
+}
+
+func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("export", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var help bool
+	var folder string
+	var limit int
+	var tag string
+	var have string
+	var fields string
+	var cursorPath string
+	fs.BoolVar(&help, "help", false, "Show help")
+	fs.BoolVar(&help, "h", false, "Show help")
+	fs.StringVar(&folder, "folder", "unread", "Folder: unread|starred|archive|<id>|\"Title\"")
+	fs.IntVar(&limit, "limit", 0, "Limit (0 = no limit, max 500)")
+	fs.StringVar(&tag, "tag", "", "Tag name (when provided, folder is ignored)")
+	fs.StringVar(&have, "have", "", "Comma-separated IDs to exclude (id:progress:timestamp)")
+	fs.StringVar(&fields, "fields", "", "Comma-separated fields (json/ndjson only)")
+	fs.StringVar(&cursorPath, "cursor", "", "Path to cursor file for incremental sync")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if help {
+		printFlagUsage(stdout, usageExport(), fs)
+		return 0
+	}
+	if limit < 0 || limit > 500 {
+		return printUsageError(stderr, fmt.Sprintf("invalid --limit %d (expected 0..500)", limit))
+	}
+	if fields != "" && !strings.EqualFold(opts.Format, "json") && !isNDJSONFormat(opts.Format) {
+		return printUsageError(stderr, "--fields requires --json or --ndjson output")
+	}
+
+	client, _, _, err := requireClient(opts, cfg, true, stderr)
 	if err != nil {
 		return printError(stderr, err)
 	}
-	if closeFn != nil {
-		defer closeFn()
+
+	folderID := ""
+	if tag == "" {
+		folderID, err = resolveListFolderID(ctx, client, folder)
+		if err != nil {
+			return printError(stderr, err)
+		}
 	}
-	if err := output.PrintBookmarks(out, opts.Format, resp.Bookmarks); err != nil {
+
+	resp, err := listBookmarks(ctx, client, listBookmarksParams{
+		Limit:      limit,
+		FolderID:   folderID,
+		Tag:        tag,
+		Have:       have,
+		Fields:     fields,
+		CursorPath: cursorPath,
+	})
+	if err != nil {
 		return printError(stderr, err)
 	}
-	if outputPath != "" && outputPath != "-" && !opts.Quiet {
-		fmt.Fprintln(stdout, outputPath)
+	if fields != "" && (strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format)) {
+		if err := output.PrintBookmarksWithFields(stdout, opts.Format, resp.Bookmarks, fields); err != nil {
+			return printError(stderr, err)
+		}
+		return 0
+	}
+	if err := output.PrintBookmarks(stdout, opts.Format, resp.Bookmarks); err != nil {
+		return printError(stderr, err)
 	}
 	return 0
+}
+
+type importItem struct {
+	URL         string
+	Title       string
+	Description string
+	Tags        []string
+	Folder      string
+	Archive     bool
+}
+
+func runImport(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("import", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var help bool
+	var inputPath string
+	var inputFormat string
+	var folder string
+	var tags string
+	var archive bool
+	fs.BoolVar(&help, "help", false, "Show help")
+	fs.BoolVar(&help, "h", false, "Show help")
+	fs.StringVar(&inputPath, "input", "-", "Input file ('-' for stdin)")
+	fs.StringVar(&inputFormat, "input-format", "plain", "Input format: plain|csv|ndjson")
+	fs.StringVar(&folder, "folder", "", "Default folder for imported items")
+	fs.StringVar(&tags, "tags", "", "Default tags for imported items (comma-separated)")
+	fs.BoolVar(&archive, "archive", false, "Archive imported items")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if help {
+		printFlagUsage(stdout, usageImport(), fs)
+		return 0
+	}
+	switch strings.ToLower(strings.TrimSpace(inputFormat)) {
+	case "plain", "csv", "ndjson", "jsonl":
+	default:
+		return printUsageError(stderr, fmt.Sprintf("invalid --input-format %q (expected plain, csv, or ndjson)", inputFormat))
+	}
+	items, err := readImportItems(inputPath, inputFormat, folder, tags, archive)
+	if err != nil {
+		return printError(stderr, err)
+	}
+	if len(items) == 0 {
+		return 0
+	}
+	if opts.DryRun {
+		return emitDryRunItems(stdout, opts.Format, "import", items)
+	}
+	client, _, _, err := requireClient(opts, cfg, true, stderr)
+	if err != nil {
+		return printError(stderr, err)
+	}
+	folderCache := map[string]string{}
+	exit := 0
+	for _, it := range items {
+		folderID := ""
+		if it.Folder != "" {
+			if cached, ok := folderCache[it.Folder]; ok {
+				folderID = cached
+			} else if _, err := strconv.ParseInt(it.Folder, 10, 64); err == nil {
+				folderID = it.Folder
+			} else {
+				id, err := resolveUserFolderID(ctx, client, it.Folder)
+				if err != nil {
+					exit = exitCodeForError(err)
+					writeErrorLine(stderr, err)
+					continue
+				}
+				folderCache[it.Folder] = id
+				folderID = id
+			}
+		}
+		req := instapaper.AddBookmarkRequest{
+			URL:             it.URL,
+			Title:           it.Title,
+			Description:     it.Description,
+			FolderID:        folderID,
+			ResolveFinalURL: cfg.Defaults.ResolveFinalURLValue(),
+			Archived:        it.Archive,
+			Tags:            it.Tags,
+		}
+		bm, err := client.AddBookmark(ctx, req)
+		if err != nil {
+			exit = exitCodeForError(err)
+			writeErrorLine(stderr, fmt.Errorf("adding %s: %v", it.URL, err))
+			continue
+		}
+		if opts.Quiet {
+			fmt.Fprintf(stdout, "%d\n", int64(bm.BookmarkID))
+			continue
+		}
+		if strings.EqualFold(opts.Format, "json") {
+			_ = output.WriteJSONLine(stdout, bm)
+			continue
+		}
+		if isNDJSONFormat(opts.Format) {
+			_ = output.WriteJSONLine(stdout, bm)
+			continue
+		}
+		fmt.Fprintf(stdout, "Added %d: %s\n", int64(bm.BookmarkID), bm.Title)
+	}
+	return exit
+}
+
+func runHealth(ctx context.Context, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	client, _, _, err := requireClient(opts, cfg, true, stderr)
+	if err != nil {
+		return printError(stderr, err)
+	}
+	u, err := client.VerifyCredentials(ctx)
+	if err != nil {
+		return printError(stderr, err)
+	}
+	payload := map[string]any{
+		"status": "ok",
+		"user": map[string]any{
+			"user_id":  u.UserID,
+			"username": u.Username,
+		},
+	}
+	if strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format) {
+		if err := writeJSONByFormat(stdout, opts.Format, payload); err != nil {
+			return printError(stderr, err)
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "OK %s (user_id=%d)\n", u.Username, u.UserID)
+	return 0
+}
+
+func runVerify(ctx context.Context, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
+	ck, cs := consumerCredsFromEnvOrConfig(cfg)
+	hasAuth := cfg.HasAuth()
+	result := map[string]any{
+		"consumer_key":    ck != "",
+		"consumer_secret": cs != "",
+		"auth":            hasAuth,
+	}
+	ok := (ck != "" && cs != "")
+	if hasAuth {
+		client, _, _, err := requireClient(opts, cfg, true, stderr)
+		if err != nil {
+			result["network"] = false
+			ok = false
+		} else if _, err := client.VerifyCredentials(ctx); err != nil {
+			result["network"] = false
+			result["error"] = err.Error()
+			ok = false
+		} else {
+			result["network"] = true
+		}
+	} else {
+		result["network"] = false
+		ok = false
+	}
+	result["ok"] = ok
+	if strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format) {
+		if err := writeJSONByFormat(stdout, opts.Format, result); err != nil {
+			return printError(stderr, err)
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "consumer_key=%t\nconsumer_secret=%t\nauth=%t\nnetwork=%t\nok=%t\n",
+		result["consumer_key"], result["consumer_secret"], result["auth"], result["network"], result["ok"])
+	return 0
+}
+
+func runSchema(args []string, opts *GlobalOptions, stdout, stderr io.Writer) int {
+	target := "bookmarks"
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		target = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	schema, ok := schemaForTarget(target)
+	if !ok {
+		return printUsageError(stderr, "usage: ip schema [bookmarks|folders|highlights|auth|config]")
+	}
+	if err := writeJSONByFormat(stdout, opts.Format, schema); err != nil {
+		return printError(stderr, err)
+	}
+	return 0
+}
+
+func runTags(args []string, stdout, stderr io.Writer) int {
+	msg := "tags management is not available via the Instapaper API; use `ip list --tag <name>` instead"
+	return printError(stderr, errors.New(msg))
+}
+
+type listBookmarksParams struct {
+	Limit      int
+	FolderID   string
+	Tag        string
+	Have       string
+	Highlights string
+	Fields     string
+	CursorPath string
+}
+
+type cursorEntry struct {
+	Hash              string  `json:"hash,omitempty"`
+	Progress          float64 `json:"progress,omitempty"`
+	ProgressTimestamp int64   `json:"progress_timestamp,omitempty"`
+}
+
+type listCursor struct {
+	Have map[string]cursorEntry `json:"have"`
+}
+
+func listBookmarks(ctx context.Context, client *instapaper.Client, params listBookmarksParams) (instapaper.BookmarksListResponse, error) {
+	var cursor *listCursor
+	if params.CursorPath != "" {
+		c, err := loadCursor(params.CursorPath)
+		if err != nil {
+			return instapaper.BookmarksListResponse{}, err
+		}
+		cursor = c
+	}
+
+	have := strings.TrimSpace(params.Have)
+	if have != "" {
+		if cursor == nil {
+			cursor = &listCursor{Have: map[string]cursorEntry{}}
+		}
+		mergeHaveString(cursor, have)
+		have = haveStringFromCursor(cursor)
+	} else if cursor != nil {
+		have = haveStringFromCursor(cursor)
+	}
+
+	limit := params.Limit
+	if limit == 0 {
+		if cursor == nil {
+			cursor = &listCursor{Have: map[string]cursorEntry{}}
+		}
+		limit = 500
+	}
+	resp := instapaper.BookmarksListResponse{}
+	pages := 0
+	for {
+		pages++
+		if pages > 200 {
+			return resp, fmt.Errorf("list exceeded max pages; use --limit to cap results")
+		}
+		r, err := client.ListBookmarks(ctx, instapaper.ListBookmarksOptions{
+			Limit:      limit,
+			FolderID:   params.FolderID,
+			Tag:        params.Tag,
+			Have:       have,
+			Highlights: params.Highlights,
+		})
+		if err != nil {
+			return resp, err
+		}
+		resp.User = r.User
+		resp.Bookmarks = append(resp.Bookmarks, r.Bookmarks...)
+		resp.Highlights = append(resp.Highlights, r.Highlights...)
+		resp.DeleteIDs = append(resp.DeleteIDs, r.DeleteIDs...)
+		if cursor != nil {
+			updateCursor(cursor, r.Bookmarks, r.DeleteIDs)
+			have = haveStringFromCursor(cursor)
+		}
+		if params.Limit > 0 || len(r.Bookmarks) == 0 {
+			break
+		}
+	}
+	if cursor != nil {
+		if err := saveCursor(params.CursorPath, cursor); err != nil {
+			return resp, err
+		}
+	}
+	return resp, nil
 }
 
 func runProgress(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
@@ -775,20 +1356,25 @@ func runProgress(ctx context.Context, args []string, opts *GlobalOptions, cfg *c
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
-		fmt.Fprintln(stderr, "usage: ip progress <bookmark_id> --progress <0..1> --timestamp <unix>")
-		return 2
+		return printUsageError(stderr, "usage: ip progress <bookmark_id> --progress <0..1> --timestamp <unix>")
 	}
 	if progress < 0 || progress > 1 {
-		fmt.Fprintln(stderr, "error: --progress must be between 0 and 1")
-		return 2
+		return printUsageError(stderr, "--progress must be between 0 and 1")
 	}
 	if timestamp <= 0 {
-		fmt.Fprintln(stderr, "error: --timestamp is required (unix seconds)")
-		return 2
+		return printUsageError(stderr, "--timestamp is required (unix seconds)")
 	}
 	id, err := parseInt64(rest[0])
 	if err != nil {
 		return printError(stderr, err)
+	}
+	if opts.DryRun {
+		_ = emitDryRunAction(stdout, opts.Format, "progress", map[string]any{
+			"bookmark_id": id,
+			"progress":    progress,
+			"timestamp":   timestamp,
+		})
+		return 0
 	}
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
 	if err != nil {
@@ -819,6 +1405,10 @@ func runBookmarkMutation(ctx context.Context, cmd string, args []string, opts *G
 	if err != nil {
 		return printError(stderr, err)
 	}
+	if opts.DryRun {
+		_ = emitDryRunAction(stdout, opts.Format, cmd, map[string]any{"bookmark_id": id})
+		return 0
+	}
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
 	if err != nil {
 		return printError(stderr, err)
@@ -837,6 +1427,14 @@ func runBookmarkMutation(ctx context.Context, cmd string, args []string, opts *G
 		err = fmt.Errorf("unknown mutation: %s", cmd)
 	}
 	if err != nil {
+		if opts.Idempotent && isAlreadyStateError(err) {
+			if opts.Quiet {
+				fmt.Fprintf(stdout, "%d\n", id)
+				return 0
+			}
+			fmt.Fprintf(stdout, "OK %s %d\n", cmd, id)
+			return 0
+		}
 		return printError(stderr, err)
 	}
 	if opts.Quiet {
@@ -864,12 +1462,18 @@ func runMove(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	}
 	remaining := fs.Args()
 	if len(remaining) != 1 || folder == "" {
-		fmt.Fprintln(stderr, "usage: ip move <bookmark_id> --folder <folder_id|\"Title\">")
-		return 2
+		return printUsageError(stderr, "usage: ip move <bookmark_id> --folder <folder_id|\"Title\">")
 	}
 	id, err := parseInt64(remaining[0])
 	if err != nil {
 		return printError(stderr, err)
+	}
+	if opts.DryRun {
+		_ = emitDryRunAction(stdout, opts.Format, "move", map[string]any{
+			"bookmark_id": id,
+			"folder":      folder,
+		})
+		return 0
 	}
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
 	if err != nil {
@@ -880,8 +1484,7 @@ func runMove(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 		return printError(stderr, err)
 	}
 	if folderID == "" {
-		fmt.Fprintln(stderr, "error: --folder must be a user folder")
-		return 2
+		return printUsageError(stderr, "--folder must be a user folder")
 	}
 	bm, err := client.Move(ctx, id, folderID)
 	if err != nil {
@@ -900,9 +1503,11 @@ func runDelete(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	fs.SetOutput(stderr)
 	var help bool
 	var yes bool
+	var confirm string
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.BoolVar(&yes, "yes-really-delete", false, "Confirm permanent deletion")
+	fs.StringVar(&confirm, "confirm", "", "Confirm delete by repeating the bookmark id")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -912,16 +1517,21 @@ func runDelete(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	}
 	remaining := fs.Args()
 	if len(remaining) != 1 {
-		fmt.Fprintln(stderr, "usage: ip delete <bookmark_id> --yes-really-delete")
-		return 2
+		return printUsageError(stderr, "usage: ip delete <bookmark_id> --yes-really-delete|--confirm <bookmark_id>")
 	}
-	if !yes {
-		fmt.Fprintln(stderr, "refusing: permanent delete requires --yes-really-delete")
-		return 2
+	if !opts.DryRun && !yes && confirm == "" {
+		return printUsageError(stderr, "refusing: permanent delete requires --yes-really-delete or --confirm <bookmark_id>")
 	}
 	id, err := parseInt64(remaining[0])
 	if err != nil {
 		return printError(stderr, err)
+	}
+	if confirm != "" && confirm != remaining[0] {
+		return printError(stderr, fmt.Errorf("--confirm must match bookmark id"))
+	}
+	if opts.DryRun {
+		_ = emitDryRunAction(stdout, opts.Format, "delete", map[string]any{"bookmark_id": id})
+		return 0
 	}
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
 	if err != nil {
@@ -955,8 +1565,7 @@ func runText(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	}
 	remaining := fs.Args()
 	if len(remaining) != 1 {
-		fmt.Fprintln(stderr, "usage: ip text <bookmark_id> [--out file] [--open]")
-		return 2
+		return printUsageError(stderr, "usage: ip text <bookmark_id> [--out file] [--open]")
 	}
 	id, err := parseInt64(remaining[0])
 	if err != nil {
@@ -997,8 +1606,7 @@ func runFolders(ctx context.Context, args []string, opts *GlobalOptions, cfg *co
 		return 0
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: ip folders list|add|delete|order")
-		return 2
+		return printUsageError(stderr, "usage: ip folders list|add|delete|order")
 	}
 	sub := args[0]
 	subArgs := args[1:]
@@ -1022,11 +1630,21 @@ func runFolders(ctx context.Context, args []string, opts *GlobalOptions, cfg *co
 			return 0
 		}
 		if len(subArgs) != 1 {
-			fmt.Fprintln(stderr, "usage: ip folders add \"Title\"")
-			return 2
+			return printUsageError(stderr, "usage: ip folders add \"Title\"")
+		}
+		if opts.DryRun {
+			_ = emitDryRunAction(stdout, opts.Format, "folders.add", map[string]any{"title": subArgs[0]})
+			return 0
 		}
 		f, err := client.AddFolder(ctx, subArgs[0])
 		if err != nil {
+			var apiErr *instapaper.APIError
+			if opts.Idempotent && errors.As(err, &apiErr) && apiErr.Code == 1251 {
+				if !opts.Quiet {
+					fmt.Fprintln(stdout, "Folder already exists")
+				}
+				return 0
+			}
 			return printError(stderr, err)
 		}
 		if opts.Quiet {
@@ -1040,9 +1658,11 @@ func runFolders(ctx context.Context, args []string, opts *GlobalOptions, cfg *co
 		fs.SetOutput(stderr)
 		var help bool
 		var yes bool
+		var confirm string
 		fs.BoolVar(&help, "help", false, "Show help")
 		fs.BoolVar(&help, "h", false, "Show help")
 		fs.BoolVar(&yes, "yes", false, "Confirm delete")
+		fs.StringVar(&confirm, "confirm", "", "Confirm delete by repeating the folder id")
 		if err := fs.Parse(subArgs); err != nil {
 			return 2
 		}
@@ -1052,24 +1672,28 @@ func runFolders(ctx context.Context, args []string, opts *GlobalOptions, cfg *co
 		}
 		rest := fs.Args()
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: ip folders delete <folder_id|\"Title\"> --yes")
-			return 2
+			return printUsageError(stderr, "usage: ip folders delete <folder_id|\"Title\"> --yes|--confirm <folder_id>")
 		}
-		if !yes {
-			fmt.Fprintln(stderr, "refusing: folder delete requires --yes")
-			return 2
+		if !opts.DryRun && !yes && confirm == "" {
+			return printUsageError(stderr, "refusing: folder delete requires --yes or --confirm <folder_id>")
 		}
 		folderIDStr, err := resolveUserFolderID(ctx, client, rest[0])
 		if err != nil {
 			return printError(stderr, err)
 		}
 		if folderIDStr == "" {
-			fmt.Fprintln(stderr, "error: must specify a user folder")
-			return 2
+			return printUsageError(stderr, "must specify a user folder")
+		}
+		if confirm != "" && confirm != folderIDStr {
+			return printError(stderr, fmt.Errorf("--confirm must match folder id"))
 		}
 		id, err := parseInt64(folderIDStr)
 		if err != nil {
 			return printError(stderr, err)
+		}
+		if opts.DryRun {
+			_ = emitDryRunAction(stdout, opts.Format, "folders.delete", map[string]any{"folder_id": id})
+			return 0
 		}
 		if err := client.DeleteFolder(ctx, id); err != nil {
 			return printError(stderr, err)
@@ -1084,8 +1708,11 @@ func runFolders(ctx context.Context, args []string, opts *GlobalOptions, cfg *co
 			return 0
 		}
 		if len(subArgs) != 1 {
-			fmt.Fprintln(stderr, "usage: ip folders order \"100:1,200:2,300:3\"")
-			return 2
+			return printUsageError(stderr, "usage: ip folders order \"100:1,200:2,300:3\"")
+		}
+		if opts.DryRun {
+			_ = emitDryRunAction(stdout, opts.Format, "folders.order", map[string]any{"order": subArgs[0]})
+			return 0
 		}
 		folders, err := client.SetFolderOrder(ctx, subArgs[0])
 		if err != nil {
@@ -1096,8 +1723,7 @@ func runFolders(ctx context.Context, args []string, opts *GlobalOptions, cfg *co
 		}
 		return 0
 	default:
-		fmt.Fprintln(stderr, "usage: ip folders list|add|delete|order")
-		return 2
+		return printUsageError(stderr, "usage: ip folders list|add|delete|order")
 	}
 }
 
@@ -1108,8 +1734,7 @@ func runHighlights(ctx context.Context, args []string, opts *GlobalOptions, cfg 
 		return 0
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: ip highlights list|add|delete")
-		return 2
+		return printUsageError(stderr, "usage: ip highlights list|add|delete")
 	}
 	sub := args[0]
 	subArgs := args[1:]
@@ -1124,8 +1749,7 @@ func runHighlights(ctx context.Context, args []string, opts *GlobalOptions, cfg 
 			return 0
 		}
 		if len(subArgs) != 1 {
-			fmt.Fprintln(stderr, "usage: ip highlights list <bookmark_id>")
-			return 2
+			return printUsageError(stderr, "usage: ip highlights list <bookmark_id>")
 		}
 		bid, err := parseInt64(subArgs[0])
 		if err != nil {
@@ -1158,15 +1782,28 @@ func runHighlights(ctx context.Context, args []string, opts *GlobalOptions, cfg 
 		}
 		rest := fs.Args()
 		if len(rest) != 1 || strings.TrimSpace(text) == "" {
-			fmt.Fprintln(stderr, "usage: ip highlights add <bookmark_id> --text \"...\" [--position 0]")
-			return 2
+			return printUsageError(stderr, "usage: ip highlights add <bookmark_id> --text \"...\" [--position 0]")
 		}
 		bid, err := parseInt64(rest[0])
 		if err != nil {
 			return printError(stderr, err)
 		}
+		if opts.DryRun {
+			_ = emitDryRunAction(stdout, opts.Format, "highlights.add", map[string]any{
+				"bookmark_id": bid,
+				"text":        text,
+				"position":    position,
+			})
+			return 0
+		}
 		h, err := client.CreateHighlight(ctx, bid, text, position)
 		if err != nil {
+			if opts.Idempotent && isAlreadyStateError(err) {
+				if !opts.Quiet {
+					fmt.Fprintln(stdout, "Highlight already exists")
+				}
+				return 0
+			}
 			return printError(stderr, err)
 		}
 		if opts.Quiet {
@@ -1181,12 +1818,15 @@ func runHighlights(ctx context.Context, args []string, opts *GlobalOptions, cfg 
 			return 0
 		}
 		if len(subArgs) != 1 {
-			fmt.Fprintln(stderr, "usage: ip highlights delete <highlight_id>")
-			return 2
+			return printUsageError(stderr, "usage: ip highlights delete <highlight_id>")
 		}
 		hid, err := parseInt64(subArgs[0])
 		if err != nil {
 			return printError(stderr, err)
+		}
+		if opts.DryRun {
+			_ = emitDryRunAction(stdout, opts.Format, "highlights.delete", map[string]any{"highlight_id": hid})
+			return 0
 		}
 		if err := client.DeleteHighlight(ctx, hid); err != nil {
 			return printError(stderr, err)
@@ -1196,8 +1836,7 @@ func runHighlights(ctx context.Context, args []string, opts *GlobalOptions, cfg 
 		}
 		return 0
 	default:
-		fmt.Fprintln(stderr, "usage: ip highlights list|add|delete")
-		return 2
+		return printUsageError(stderr, "usage: ip highlights list|add|delete")
 	}
 }
 
@@ -1216,14 +1855,58 @@ func printError(stderr io.Writer, err error) int {
 	}
 	var apiErr *instapaper.APIError
 	if errors.As(err, &apiErr) {
+		hint := apiErrorHint(apiErr.Code)
+		exitCode := exitCodeForError(apiErr)
+		if stderrJSONEnabled {
+			payload := map[string]any{
+				"error":     apiErr.Error(),
+				"api_code":  apiErr.Code,
+				"exit_code": exitCode,
+			}
+			if hint != "" {
+				payload["hint"] = hint
+			}
+			_ = output.WriteJSONLine(stderr, payload)
+			return exitCode
+		}
 		fmt.Fprintln(stderr, "error:", apiErr.Error())
-		if hint := apiErrorHint(apiErr.Code); hint != "" {
+		if hint != "" {
 			fmt.Fprintln(stderr, "hint:", hint)
 		}
-		return exitCodeForError(apiErr)
+		return exitCode
+	}
+	exitCode := exitCodeForError(err)
+	if stderrJSONEnabled {
+		payload := map[string]any{
+			"error":     err.Error(),
+			"exit_code": exitCode,
+		}
+		_ = output.WriteJSONLine(stderr, payload)
+		return exitCode
 	}
 	fmt.Fprintln(stderr, "error:", err)
-	return exitCodeForError(err)
+	return exitCode
+}
+
+func printUsageError(stderr io.Writer, msg string) int {
+	if stderrJSONEnabled {
+		payload := map[string]any{
+			"error":     msg,
+			"exit_code": 2,
+		}
+		_ = output.WriteJSONLine(stderr, payload)
+		return 2
+	}
+	fmt.Fprintln(stderr, "error:", msg)
+	return 2
+}
+
+func writeErrorLine(stderr io.Writer, err error) {
+	if stderrJSONEnabled {
+		_ = output.WriteJSONLine(stderr, map[string]any{"error": err.Error()})
+		return
+	}
+	fmt.Fprintf(stderr, "error: %v\n", err)
 }
 
 func exitCodeForError(err error) int {
@@ -1290,6 +1973,19 @@ func apiErrorHint(code int) string {
 	}
 }
 
+func isAlreadyStateError(err error) bool {
+	var apiErr *instapaper.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.Code == 1601 {
+			return true
+		}
+		if strings.Contains(strings.ToLower(apiErr.Message), "already") {
+			return true
+		}
+	}
+	return false
+}
+
 func hasHelpFlag(args []string) bool {
 	for _, a := range args {
 		if a == "-h" || a == "--help" {
@@ -1328,6 +2024,137 @@ func openOutputWriter(outputPath string, stdout io.Writer) (io.Writer, func(), e
 	return f, func() { _ = f.Close() }, nil
 }
 
+func loadCursor(path string) (*listCursor, error) {
+	cur := &listCursor{Have: map[string]cursorEntry{}}
+	if path == "" {
+		return cur, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cur, nil
+		}
+		return nil, err
+	}
+	if len(b) == 0 {
+		return cur, nil
+	}
+	if err := json.Unmarshal(b, cur); err != nil {
+		return nil, fmt.Errorf("parse cursor %s: %w", path, err)
+	}
+	if cur.Have == nil {
+		cur.Have = map[string]cursorEntry{}
+	}
+	return cur, nil
+}
+
+func saveCursor(path string, cur *listCursor) error {
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(cur, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(path)
+		if err2 := os.Rename(tmp, path); err2 != nil {
+			_ = os.Remove(tmp)
+			return err2
+		}
+	}
+	return nil
+}
+
+func updateCursor(cur *listCursor, bookmarks []instapaper.Bookmark, deleteIDs []instapaper.Int64) {
+	if cur == nil {
+		return
+	}
+	for _, b := range bookmarks {
+		id := strconv.FormatInt(int64(b.BookmarkID), 10)
+		entry := cursorEntry{
+			Hash:              b.Hash,
+			Progress:          float64(b.Progress),
+			ProgressTimestamp: int64(b.ProgressTimestamp),
+		}
+		cur.Have[id] = entry
+	}
+	for _, id := range deleteIDs {
+		delete(cur.Have, strconv.FormatInt(int64(id), 10))
+	}
+}
+
+func haveStringFromCursor(cur *listCursor) string {
+	if cur == nil || len(cur.Have) == 0 {
+		return ""
+	}
+	ids := make([]string, 0, len(cur.Have))
+	for id := range cur.Have {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		entry := cur.Have[id]
+		parts = append(parts, formatHaveEntry(id, entry))
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatHaveEntry(id string, entry cursorEntry) string {
+	if entry.Hash == "" {
+		return id
+	}
+	if entry.ProgressTimestamp > 0 {
+		return strings.Join([]string{
+			id,
+			entry.Hash,
+			strconv.FormatFloat(entry.Progress, 'f', -1, 64),
+			strconv.FormatInt(entry.ProgressTimestamp, 10),
+		}, ":")
+	}
+	return id + ":" + entry.Hash
+}
+
+func mergeHaveString(cur *listCursor, have string) {
+	if cur == nil {
+		return
+	}
+	for _, part := range strings.Split(have, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		fields := strings.Split(part, ":")
+		id := strings.TrimSpace(fields[0])
+		if id == "" {
+			continue
+		}
+		entry := cursorEntry{}
+		if len(fields) > 1 {
+			entry.Hash = fields[1]
+		}
+		if len(fields) > 3 {
+			if p, err := strconv.ParseFloat(fields[2], 64); err == nil {
+				entry.Progress = p
+			}
+			if ts, err := strconv.ParseInt(fields[3], 10, 64); err == nil {
+				entry.ProgressTimestamp = ts
+			}
+		}
+		cur.Have[id] = entry
+	}
+}
+
 func printConfig(w io.Writer, cfg *config.Config) error {
 	tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
 	fmt.Fprintln(tw, "KEY\tVALUE")
@@ -1350,8 +2177,496 @@ func printConfig(w io.Writer, cfg *config.Config) error {
 	return tw.Flush()
 }
 
+func readImportItems(path, format, defaultFolder, defaultTags string, defaultArchive bool) ([]importItem, error) {
+	r, closeFn, err := openInputReader(path)
+	if err != nil {
+		return nil, err
+	}
+	if closeFn != nil {
+		defer closeFn()
+	}
+	defaultTagList := splitTags(defaultTags)
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "plain":
+		return readPlainImportItems(r, defaultFolder, defaultTagList, defaultArchive)
+	case "csv":
+		return readCSVImportItems(r, defaultFolder, defaultTagList, defaultArchive)
+	case "ndjson", "jsonl":
+		return readNDJSONImportItems(r, defaultFolder, defaultTagList, defaultArchive)
+	default:
+		return nil, fmt.Errorf("invalid --input-format %q (expected plain, csv, or ndjson)", format)
+	}
+}
+
+func openInputReader(path string) (io.Reader, func(), error) {
+	if path == "" || path == "-" {
+		return os.Stdin, nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, func() { _ = f.Close() }, nil
+}
+
+func readPlainImportItems(r io.Reader, folder string, tags []string, archive bool) ([]importItem, error) {
+	var items []importItem
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		items = append(items, importItem{
+			URL:     line,
+			Folder:  folder,
+			Tags:    tags,
+			Archive: archive,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func readNDJSONImportItems(r io.Reader, folder string, tags []string, archive bool) ([]importItem, error) {
+	var items []importItem
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			return nil, fmt.Errorf("parse ndjson: %w", err)
+		}
+		url := toString(obj["url"])
+		if url == "" {
+			return nil, errors.New("missing url in ndjson item")
+		}
+		item := importItem{
+			URL:         url,
+			Title:       toString(obj["title"]),
+			Description: toString(obj["description"]),
+			Folder:      toString(obj["folder"]),
+			Tags:        parseTagsValue(obj["tags"]),
+			Archive:     toBool(obj["archive"], archive),
+		}
+		if item.Folder == "" {
+			item.Folder = folder
+		}
+		item.Tags = mergeTags(item.Tags, tags)
+		items = append(items, item)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func readCSVImportItems(r io.Reader, folder string, tags []string, archive bool) ([]importItem, error) {
+	reader := csv.NewReader(r)
+	reader.FieldsPerRecord = -1
+	rows, err := reader.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	header := map[string]int{}
+	start := 0
+	for i, col := range rows[0] {
+		name := strings.ToLower(strings.TrimSpace(col))
+		if name != "" {
+			header[name] = i
+		}
+	}
+	if _, ok := header["url"]; ok {
+		start = 1
+	} else {
+		header = map[string]int{
+			"url":   0,
+			"title": 1,
+			"tags":  2,
+		}
+	}
+	items := make([]importItem, 0, len(rows)-start)
+	for _, row := range rows[start:] {
+		url := getCSV(row, header, "url")
+		if strings.TrimSpace(url) == "" {
+			continue
+		}
+		item := importItem{
+			URL:         url,
+			Title:       getCSV(row, header, "title"),
+			Description: getCSV(row, header, "description"),
+			Folder:      getCSV(row, header, "folder"),
+			Tags:        splitTags(getCSV(row, header, "tags")),
+			Archive:     toBool(getCSV(row, header, "archive"), archive),
+		}
+		if item.Folder == "" {
+			item.Folder = folder
+		}
+		item.Tags = mergeTags(item.Tags, tags)
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func getCSV(row []string, header map[string]int, key string) string {
+	idx, ok := header[key]
+	if !ok || idx >= len(row) {
+		return ""
+	}
+	return strings.TrimSpace(row[idx])
+}
+
+func toString(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", t))
+	}
+}
+
+func toBool(v any, fallback bool) bool {
+	if v == nil {
+		return fallback
+	}
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		b, err := parseBool(t)
+		if err != nil {
+			return fallback
+		}
+		return b
+	default:
+		return fallback
+	}
+}
+
+func parseTagsValue(v any) []string {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case string:
+		return splitTags(t)
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s := toString(item); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func splitTags(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func mergeTags(primary, fallback []string) []string {
+	if len(primary) == 0 {
+		return fallback
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(primary)+len(fallback))
+	for _, t := range primary {
+		if !seen[t] {
+			out = append(out, t)
+			seen[t] = true
+		}
+	}
+	for _, t := range fallback {
+		if !seen[t] {
+			out = append(out, t)
+			seen[t] = true
+		}
+	}
+	return out
+}
+
+func emitDryRunAction(w io.Writer, format, action string, data map[string]any) error {
+	payload := map[string]any{
+		"dry_run": true,
+		"action":  action,
+		"data":    data,
+	}
+	if strings.EqualFold(format, "json") {
+		return output.WriteJSON(w, payload)
+	}
+	if isNDJSONFormat(format) {
+		return output.WriteJSONLine(w, payload)
+	}
+	fmt.Fprintf(w, "DRY RUN: %s\n", action)
+	return nil
+}
+
+func emitDryRunItems(w io.Writer, format, action string, items []importItem) int {
+	records := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		records = append(records, map[string]any{
+			"url":         item.URL,
+			"title":       item.Title,
+			"description": item.Description,
+			"tags":        item.Tags,
+			"folder":      item.Folder,
+			"archive":     item.Archive,
+		})
+	}
+	return emitDryRunRecords(w, format, action, records)
+}
+
+func emitDryRunRecords(w io.Writer, format, action string, records []map[string]any) int {
+	if strings.EqualFold(format, "json") {
+		payload := map[string]any{
+			"dry_run": true,
+			"action":  action,
+			"items":   records,
+		}
+		if err := output.WriteJSON(w, payload); err != nil {
+			return 1
+		}
+		return 0
+	}
+	if isNDJSONFormat(format) {
+		for _, record := range records {
+			if err := output.WriteJSONLine(w, map[string]any{
+				"dry_run": true,
+				"action":  action,
+				"data":    record,
+			}); err != nil {
+				return 1
+			}
+		}
+		return 0
+	}
+	for _, record := range records {
+		url, _ := record["url"].(string)
+		fmt.Fprintf(w, "DRY RUN: %s %s\n", action, url)
+	}
+	return 0
+}
+
+func printConfigPlain(w io.Writer, cfg *config.Config) error {
+	fmt.Fprintf(w, "api_base=%s\n", cfg.APIBase)
+	if cfg.ConsumerKey != "" {
+		fmt.Fprintf(w, "consumer_key=%s\n", cfg.ConsumerKey)
+	}
+	if cfg.ConsumerSecret != "" {
+		fmt.Fprintf(w, "consumer_secret=%s\n", cfg.ConsumerSecret)
+	}
+	fmt.Fprintf(w, "defaults.format=%s\n", cfg.Defaults.Format)
+	fmt.Fprintf(w, "defaults.list_limit=%d\n", cfg.Defaults.ListLimit)
+	if cfg.Defaults.ResolveFinalURL != nil {
+		fmt.Fprintf(w, "defaults.resolve_final_url=%t\n", *cfg.Defaults.ResolveFinalURL)
+	}
+	if cfg.HasAuth() {
+		fmt.Fprintf(w, "user.user_id=%d\n", cfg.User.UserID)
+		fmt.Fprintf(w, "user.username=%s\n", cfg.User.Username)
+	}
+	return nil
+}
+
+func configGet(cfg *config.Config, key string) (any, bool, error) {
+	switch key {
+	case "api_base":
+		return cfg.APIBase, true, nil
+	case "consumer_key":
+		return cfg.ConsumerKey, true, nil
+	case "consumer_secret":
+		return cfg.ConsumerSecret, true, nil
+	case "defaults.format":
+		return cfg.Defaults.Format, true, nil
+	case "defaults.list_limit":
+		return cfg.Defaults.ListLimit, true, nil
+	case "defaults.resolve_final_url":
+		if cfg.Defaults.ResolveFinalURL == nil {
+			return nil, true, nil
+		}
+		return *cfg.Defaults.ResolveFinalURL, true, nil
+	default:
+		return nil, false, nil
+	}
+}
+
+func configSet(cfg *config.Config, key, value string) error {
+	switch key {
+	case "api_base":
+		cfg.APIBase = value
+		return nil
+	case "consumer_key":
+		cfg.ConsumerKey = value
+		return nil
+	case "consumer_secret":
+		cfg.ConsumerSecret = value
+		return nil
+	case "defaults.format":
+		if err := validateFormat(value); err != nil {
+			return err
+		}
+		cfg.Defaults.Format = value
+		return nil
+	case "defaults.list_limit":
+		v, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid list_limit: %w", err)
+		}
+		if v < 0 || v > 500 {
+			return fmt.Errorf("invalid list_limit %d (expected 0..500)", v)
+		}
+		cfg.Defaults.ListLimit = v
+		return nil
+	case "defaults.resolve_final_url":
+		b, err := parseBool(value)
+		if err != nil {
+			return err
+		}
+		cfg.Defaults.ResolveFinalURL = &b
+		return nil
+	default:
+		return fmt.Errorf("unknown config key: %s", key)
+	}
+}
+
+func configUnset(cfg *config.Config, key string) error {
+	switch key {
+	case "api_base":
+		cfg.APIBase = ""
+	case "consumer_key":
+		cfg.ConsumerKey = ""
+	case "consumer_secret":
+		cfg.ConsumerSecret = ""
+	case "defaults.format":
+		cfg.Defaults.Format = ""
+	case "defaults.list_limit":
+		cfg.Defaults.ListLimit = 0
+	case "defaults.resolve_final_url":
+		cfg.Defaults.ResolveFinalURL = nil
+	default:
+		return fmt.Errorf("unknown config key: %s", key)
+	}
+	return nil
+}
+
+func parseBool(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y", "on":
+		return true, nil
+	case "0", "false", "no", "n", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean: %s", value)
+	}
+}
+
+func isNDJSONFormat(format string) bool {
+	return strings.EqualFold(format, "ndjson") || strings.EqualFold(format, "jsonl")
+}
+
+func writeJSONByFormat(w io.Writer, format string, v any) error {
+	if isNDJSONFormat(format) {
+		return output.WriteJSONLine(w, v)
+	}
+	return output.WriteJSON(w, v)
+}
+
+func schemaForTarget(target string) (map[string]any, bool) {
+	base := map[string]any{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+	}
+	switch target {
+	case "bookmarks", "bookmark":
+		base["type"] = "object"
+		base["properties"] = map[string]any{
+			"type":               map[string]any{"type": "string"},
+			"bookmark_id":        map[string]any{"type": "integer"},
+			"url":                map[string]any{"type": "string"},
+			"title":              map[string]any{"type": "string"},
+			"description":        map[string]any{"type": "string"},
+			"hash":               map[string]any{"type": "string"},
+			"progress":           map[string]any{"type": "number"},
+			"progress_timestamp": map[string]any{"type": "integer"},
+			"starred":            map[string]any{"type": "boolean"},
+			"private_source":     map[string]any{"type": "string"},
+			"time":               map[string]any{"type": "integer"},
+			"tags":               map[string]any{"type": "array"},
+		}
+		return base, true
+	case "folders", "folder":
+		base["type"] = "object"
+		base["properties"] = map[string]any{
+			"type":      map[string]any{"type": "string"},
+			"folder_id": map[string]any{"type": "integer"},
+			"title":     map[string]any{"type": "string"},
+			"position":  map[string]any{"type": "integer"},
+		}
+		return base, true
+	case "highlights", "highlight":
+		base["type"] = "object"
+		base["properties"] = map[string]any{
+			"type":         map[string]any{"type": "string"},
+			"highlight_id": map[string]any{"type": "integer"},
+			"bookmark_id":  map[string]any{"type": "integer"},
+			"text":         map[string]any{"type": "string"},
+			"time":         map[string]any{"type": "integer"},
+			"position":     map[string]any{"type": "integer"},
+		}
+		return base, true
+	case "auth":
+		base["type"] = "object"
+		base["properties"] = map[string]any{
+			"logged_in": map[string]any{"type": "boolean"},
+			"user": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"user_id":  map[string]any{"type": "integer"},
+					"username": map[string]any{"type": "string"},
+				},
+			},
+		}
+		return base, true
+	case "config":
+		base["type"] = "object"
+		base["properties"] = map[string]any{
+			"api_base":        map[string]any{"type": "string"},
+			"consumer_key":    map[string]any{"type": "string"},
+			"consumer_secret": map[string]any{"type": "string"},
+			"defaults":        map[string]any{"type": "object"},
+			"user":            map[string]any{"type": "object"},
+		}
+		return base, true
+	default:
+		return nil, false
+	}
+}
+
 func usageConfig() string {
-	return "Usage:\n  ip config path|show\n"
+	return "Usage:\n  ip config path|show|get|set|unset\n"
 }
 
 func usageAuth() string {
@@ -1367,7 +2682,15 @@ func usageAdd() string {
 }
 
 func usageList() string {
-	return "Usage:\n  ip list [flags]\n"
+	return "Usage:\n  ip list [--folder ...] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>]\n"
+}
+
+func usageExport() string {
+	return "Usage:\n  ip export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>]\n"
+}
+
+func usageImport() string {
+	return "Usage:\n  ip import [--input <file>|-] [--input-format plain|csv|ndjson] [--folder ...] [--tags ...] [--archive]\n"
 }
 
 func usageBookmarkMutation(cmd string) string {
@@ -1379,7 +2702,7 @@ func usageMove() string {
 }
 
 func usageDelete() string {
-	return "Usage:\n  ip delete <bookmark_id> --yes-really-delete\n"
+	return "Usage:\n  ip delete <bookmark_id> --yes-really-delete|--confirm <bookmark_id>\n"
 }
 
 func usageProgress() string {
@@ -1399,7 +2722,7 @@ func usageFoldersAdd() string {
 }
 
 func usageFoldersDelete() string {
-	return "Usage:\n  ip folders delete <folder_id|\"Title\"> --yes\n"
+	return "Usage:\n  ip folders delete <folder_id|\"Title\"> --yes|--confirm <folder_id>\n"
 }
 
 func usageFoldersOrder() string {
@@ -1422,11 +2745,28 @@ func usageHighlightsDelete() string {
 	return "Usage:\n  ip highlights delete <highlight_id>\n"
 }
 
+func usageHealth() string {
+	return "Usage:\n  ip health\n"
+}
+
+func usageVerify() string {
+	return "Usage:\n  ip verify\n"
+}
+
+func usageSchema() string {
+	return "Usage:\n  ip schema [bookmarks|folders|highlights|auth|config]\n"
+}
+
+func usageTags() string {
+	return "Usage:\n  ip tags list|rename|delete\n"
+}
+
 func usageAgent() string {
 	return `AI agent tips:
-  - Use --json for single objects and --ndjson for streams.
+  - Default output is NDJSON; override with --format table|plain|json if needed.
+  - Use --ndjson/--jsonl for streams, --json for single objects.
   - Prefer --plain only for line-oriented, human-friendly output.
-  - Rely on exit codes and error hints on stderr for control flow.
+  - Use --stderr-json for structured errors and exit codes.
   - For deterministic output, avoid table mode.
 Examples:
   ip --json auth status

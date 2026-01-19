@@ -21,6 +21,8 @@ type Client struct {
 	Token     *oauth1.Token
 	HTTP      *http.Client
 	UserAgent string
+	RetryCount   int
+	RetryBackoff time.Duration
 }
 
 func NewClient(baseURL, consumerKey, consumerSecret string, token *oauth1.Token, timeout time.Duration) (*Client, error) {
@@ -39,6 +41,20 @@ func NewClient(baseURL, consumerKey, consumerSecret string, token *oauth1.Token,
 		HTTP:      hc,
 		UserAgent: "instapaper-cli/0.1",
 	}, nil
+}
+
+func (c *Client) SetRetry(count int, backoff time.Duration) {
+	if c == nil {
+		return
+	}
+	if count < 0 {
+		count = 0
+	}
+	if backoff <= 0 {
+		backoff = 500 * time.Millisecond
+	}
+	c.RetryCount = count
+	c.RetryBackoff = backoff
 }
 
 type APIError struct {
@@ -62,6 +78,36 @@ func (e *APIError) Error() string {
 // postForm signs and posts an application/x-www-form-urlencoded request.
 // It returns status code, headers, and raw response body.
 func (c *Client) postForm(ctx context.Context, path string, form url.Values, accept string) (int, http.Header, []byte, error) {
+	attempts := c.RetryCount + 1
+	if attempts < 1 {
+		attempts = 1
+	}
+	backoff := c.RetryBackoff
+	if backoff <= 0 {
+		backoff = 500 * time.Millisecond
+	}
+	var lastStatus int
+	var lastHeaders http.Header
+	var lastBody []byte
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		status, headers, body, err := c.postFormOnce(ctx, path, form, accept)
+		lastStatus, lastHeaders, lastBody, lastErr = status, headers, body, err
+		if err == nil && !shouldRetry(status, body) {
+			return status, headers, body, nil
+		}
+		if ctx.Err() != nil {
+			return status, headers, body, ctx.Err()
+		}
+		if i < attempts-1 {
+			time.Sleep(backoff * time.Duration(1<<i))
+			continue
+		}
+	}
+	return lastStatus, lastHeaders, lastBody, lastErr
+}
+
+func (c *Client) postFormOnce(ctx context.Context, path string, form url.Values, accept string) (int, http.Header, []byte, error) {
 	fullURL := c.BaseURL + path
 
 	body := form.Encode()
@@ -93,6 +139,16 @@ func (c *Client) postForm(ctx context.Context, path string, form url.Values, acc
 		return 0, nil, nil, err
 	}
 	return resp.StatusCode, resp.Header, b, nil
+}
+
+func shouldRetry(status int, body []byte) bool {
+	if status == 429 || status >= 500 {
+		return true
+	}
+	if apiErr := parseAPIError(body); apiErr != nil {
+		return apiErr.Code == 1040
+	}
+	return false
 }
 
 func parseAPIError(body []byte) *APIError {

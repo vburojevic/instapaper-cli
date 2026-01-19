@@ -41,7 +41,7 @@ func DefaultConfig() *Config {
 		APIBase: DefaultBaseURL(),
 		Defaults: Defaults{
 			ListLimit: 0,
-			Format:    "table",
+			Format:    "ndjson",
 		},
 	}
 }
@@ -69,7 +69,7 @@ func Load(path string) (*Config, error) {
 		c.Defaults.ListLimit = 0
 	}
 	if c.Defaults.Format == "" {
-		c.Defaults.Format = "table"
+		c.Defaults.Format = "ndjson"
 	}
 	return c, nil
 }

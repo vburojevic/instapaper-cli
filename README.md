@@ -5,9 +5,11 @@ A dependency-free (stdlib-only) Go CLI for the Instapaper **Full API**.
 Features:
 - OAuth 1.0a signed requests (HMAC-SHA1)
 - xAuth login (`/api/1/oauth/access_token`)
-- Bookmarks: add, list, archive/unarchive, star/unstar, move, delete, get_text
+- Bookmarks: add, list, export/import, archive/unarchive, star/unstar, move, delete, get_text
 - Folders: list, add, delete, set_order
 - Highlights: list, add, delete
+- Health/verify checks, JSON schema output
+- NDJSON/JSON/plain output, structured stderr (`--stderr-json`), retries, dry-run, idempotent mode
 
 ## Install
 
@@ -29,6 +31,8 @@ Or build from source:
 go build ./cmd/ip
 ./ip version
 ```
+
+Release process: see `docs/release-checklist.md`.
 
 ## Setup
 
@@ -65,6 +69,15 @@ Config location:
 ./ip config path
 ```
 
+## Configuration
+
+```bash
+./ip config show
+./ip config get defaults.format
+./ip config set defaults.list_limit 100
+./ip config unset defaults.resolve_final_url
+```
+
 ## Add a URL
 
 ```bash
@@ -85,9 +98,12 @@ cat urls.txt | ./ip add -
 ```bash
 ./ip list --folder unread --limit 25
 ./ip list --folder archive --format json
+./ip list --folder archive --format table
 ./ip list --folder archive --json
 ./ip list --ndjson
 ./ip list --have "123:0.5:1700000000" --highlights "123,456"
+./ip list --fields "bookmark_id,title,url" --ndjson
+./ip list --cursor ~/.config/ip/cursor.json
 ./ip list --plain --output bookmarks.txt
 ./ip list --folder "My Folder"  # resolves folder title
 ```
@@ -105,6 +121,13 @@ By default, `list` returns all bookmarks (no limit) unless `defaults.list_limit`
 
 # Permanent delete (requires explicit flag)
 ./ip delete 123456 --yes-really-delete
+```
+
+Dry-run and idempotent modes:
+
+```bash
+./ip --dry-run archive 123456
+./ip --idempotent highlights add 123456 --text "Some quote"
 ```
 
 ## Get text view HTML
@@ -139,13 +162,52 @@ By default, `list` returns all bookmarks (no limit) unless `defaults.list_limit`
 ./ip highlights delete 98765
 ```
 
+## Export & import
+
+```bash
+# Export all bookmarks (NDJSON by default)
+./ip export --cursor ~/.config/ip/cursor.json
+
+# Export with specific fields
+./ip export --fields "bookmark_id,title,url" --ndjson
+
+# Import from plain text (one URL per line)
+./ip import --input urls.txt --input-format plain
+
+# Import from NDJSON
+./ip import --input bookmarks.ndjson --input-format ndjson
+```
+
+Write output to a file:
+
+```bash
+./ip list --format json --output bookmarks.json
+```
+
+## Health & verify
+
+```bash
+./ip health
+./ip verify
+```
+
+## Schemas
+
+```bash
+./ip schema bookmarks
+./ip schema auth
+```
+
 ## AI agent usage
 
-This CLI is optimized for agent workflows. Use structured output and exit codes for reliable parsing.
+This CLI is optimized for agent workflows. Default output is NDJSON; use structured output and exit codes for reliable parsing.
 
 - `--json` for single objects (auth status, config, or single operations).
 - `--ndjson` (or `--jsonl`) for streaming lists; each line is a full JSON object.
 - `--plain` for stable, line-oriented text output.
+- `--stderr-json` for structured errors and hints on stderr.
+- `--output` to write results to a file (use `-` for stdout).
+- Run `ip help ai` for agent-focused tips.
 
 Examples:
 
@@ -161,6 +223,7 @@ Examples:
 - `INSTAPAPER_CONSUMER_KEY`
 - `INSTAPAPER_CONSUMER_SECRET`
 - `INSTAPAPER_API_BASE` (optional; defaults to `https://www.instapaper.com`)
+- `INSTAPAPER_TIMEOUT` (optional; Go duration like `10s`, `1m`)
 
 ## Troubleshooting
 
