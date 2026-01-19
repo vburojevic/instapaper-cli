@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/vburojevic/instapaper-cli/internal/browser"
@@ -43,6 +44,8 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	var showVersion bool
 	var jsonOutput bool
 	var plainOutput bool
+	var ndjsonOutput bool
+	var jsonlOutput bool
 	global.StringVar(&opts.ConfigPath, "config", "", "Path to config file (default: user config dir)")
 	global.StringVar(&opts.Format, "format", "", "Output format: table, plain, or json")
 	global.BoolVar(&opts.Quiet, "quiet", false, "Less output")
@@ -51,6 +54,8 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	global.StringVar(&opts.APIBase, "api-base", "", "API base URL (default: https://www.instapaper.com)")
 	global.BoolVar(&jsonOutput, "json", false, "Output JSON (alias for --format json)")
 	global.BoolVar(&plainOutput, "plain", false, "Output plain text (alias for --format plain)")
+	global.BoolVar(&ndjsonOutput, "ndjson", false, "Output NDJSON (alias for --format ndjson)")
+	global.BoolVar(&jsonlOutput, "jsonl", false, "Output NDJSON (alias for --format ndjson)")
 	global.BoolVar(&showVersion, "version", false, "Show version")
 	global.BoolVar(&help, "help", false, "Show help")
 	global.BoolVar(&help, "h", false, "Show help")
@@ -107,6 +112,9 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	if plainOutput {
 		opts.Format = "plain"
 	}
+	if ndjsonOutput || jsonlOutput {
+		opts.Format = "ndjson"
+	}
 	if err := validateFormat(opts.Format); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
@@ -123,7 +131,7 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, version.String())
 		return 0
 	case "config":
-		return runConfig(cmdArgs, cfgPath, stdout, stderr)
+		return runConfig(cmdArgs, cfgPath, &opts, stdout, stderr)
 	case "auth":
 		return runAuth(ctx, cmdArgs, &opts, cfg, cfgPath, stdout, stderr)
 	case "add":
@@ -167,6 +175,8 @@ Global flags:
   --format table|plain|json   Output format (default from config or table)
   --json                Output JSON (alias for --format json)
   --plain               Output plain text (alias for --format plain)
+  --ndjson              Output NDJSON (alias for --format ndjson)
+  --jsonl               Output NDJSON (alias for --format ndjson)
   --timeout 15s         HTTP timeout
   --api-base <url>      API base URL (default https://www.instapaper.com)
   --debug               Debug output
@@ -181,6 +191,7 @@ Commands:
   auth login|status|logout
   add <url|-> [--folder <id|"Title">] [--title ...] [--tags "a,b"]
   list [--folder unread|starred|archive|<id>|"Title"] [--limit N] [--tag name] [--have ...] [--highlights ...] [--output <file>]
+  help ai|agent
   progress <bookmark_id> --progress <0..1> --timestamp <unix>
   archive <bookmark_id>
   unarchive <bookmark_id>
@@ -232,6 +243,8 @@ func runHelp(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, usageFolders())
 	case "highlights":
 		fmt.Fprintln(stdout, usageHighlights())
+	case "ai", "agent":
+		fmt.Fprintln(stdout, usageAgent())
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n\n", args[0])
 		fmt.Fprintln(stderr, usageRoot())
@@ -241,7 +254,7 @@ func runHelp(args []string, stdout, stderr io.Writer) int {
 }
 
 // --- config ---
-func runConfig(args []string, cfgPath string, stdout, stderr io.Writer) int {
+func runConfig(args []string, cfgPath string, opts *GlobalOptions, stdout, stderr io.Writer) int {
 	if hasHelpFlag(args) {
 		fmt.Fprintln(stdout, usageConfig())
 		return 0
@@ -259,7 +272,13 @@ func runConfig(args []string, cfgPath string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return printError(stderr, err)
 		}
-		if err := output.WriteJSON(stdout, cfg); err != nil {
+		if opts != nil && strings.EqualFold(opts.Format, "json") {
+			if err := output.WriteJSON(stdout, cfg); err != nil {
+				return printError(stderr, err)
+			}
+			return 0
+		}
+		if err := printConfig(stdout, cfg); err != nil {
 			return printError(stderr, err)
 		}
 		return 0
@@ -372,6 +391,21 @@ func runAuth(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	}
 	switch args[0] {
 	case "status":
+		if strings.EqualFold(opts.Format, "json") {
+			payload := map[string]any{
+				"logged_in": cfg.HasAuth(),
+			}
+			if cfg.HasAuth() {
+				payload["user"] = map[string]any{
+					"user_id":  cfg.User.UserID,
+					"username": cfg.User.Username,
+				}
+			}
+			if err := output.WriteJSON(stdout, payload); err != nil {
+				return printError(stderr, err)
+			}
+			return 0
+		}
 		if cfg.HasAuth() {
 			fmt.Fprintf(stdout, "Logged in as %s (user_id=%d)\n", cfg.User.Username, cfg.User.UserID)
 			return 0
@@ -670,7 +704,7 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.StringVar(&folder, "folder", "unread", "Folder: unread|starred|archive|<id>|\"Title\"")
-	fs.IntVar(&limit, "limit", cfg.Defaults.ListLimit, "Limit (1..500)")
+	fs.IntVar(&limit, "limit", cfg.Defaults.ListLimit, "Limit (0 = no limit, max 500)")
 	fs.StringVar(&tag, "tag", "", "Tag name (when provided, folder is ignored)")
 	fs.StringVar(&have, "have", "", "Comma-separated IDs to exclude (id:progress:timestamp)")
 	fs.StringVar(&highlights, "highlights", "", "Comma-separated bookmark IDs for highlights")
@@ -1169,16 +1203,24 @@ func runHighlights(ctx context.Context, args []string, opts *GlobalOptions, cfg 
 
 func validateFormat(format string) error {
 	switch strings.ToLower(strings.TrimSpace(format)) {
-	case "table", "plain", "json":
+	case "table", "plain", "json", "ndjson", "jsonl":
 		return nil
 	default:
-		return fmt.Errorf("invalid --format %q (expected table, plain, or json)", format)
+		return fmt.Errorf("invalid --format %q (expected table, plain, json, or ndjson)", format)
 	}
 }
 
 func printError(stderr io.Writer, err error) int {
 	if err == nil {
 		return 0
+	}
+	var apiErr *instapaper.APIError
+	if errors.As(err, &apiErr) {
+		fmt.Fprintln(stderr, "error:", apiErr.Error())
+		if hint := apiErrorHint(apiErr.Code); hint != "" {
+			fmt.Fprintln(stderr, "hint:", hint)
+		}
+		return exitCodeForError(apiErr)
 	}
 	fmt.Fprintln(stderr, "error:", err)
 	return exitCodeForError(err)
@@ -1203,6 +1245,49 @@ func exitCodeForError(err error) int {
 		}
 	}
 	return 1
+}
+
+func apiErrorHint(code int) string {
+	switch code {
+	case 1040:
+		return "rate limit exceeded; wait and retry"
+	case 1041:
+		return "requires Instapaper Premium"
+	case 1042:
+		return "application suspended; check Instapaper API status"
+	case 1220:
+		return "supply content for this bookmark"
+	case 1221:
+		return "the URL is not available from this source"
+	case 1240:
+		return "invalid URL"
+	case 1241:
+		return "invalid bookmark ID"
+	case 1242:
+		return "invalid folder ID"
+	case 1243:
+		return "invalid progress value"
+	case 1244:
+		return "invalid progress timestamp"
+	case 1245:
+		return "private source requires supplied content"
+	case 1250:
+		return "invalid title or unexpected error saving bookmark"
+	case 1251:
+		return "folder already exists"
+	case 1252:
+		return "cannot add bookmarks to this folder"
+	case 1500:
+		return "temporary service error; retry later"
+	case 1550:
+		return "text view generation error; retry later"
+	case 1600:
+		return "highlight text is required"
+	case 1601:
+		return "duplicate highlight"
+	default:
+		return ""
+	}
 }
 
 func hasHelpFlag(args []string) bool {
@@ -1241,6 +1326,28 @@ func openOutputWriter(outputPath string, stdout io.Writer) (io.Writer, func(), e
 		return nil, nil, err
 	}
 	return f, func() { _ = f.Close() }, nil
+}
+
+func printConfig(w io.Writer, cfg *config.Config) error {
+	tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
+	fmt.Fprintln(tw, "KEY\tVALUE")
+	fmt.Fprintf(tw, "api_base\t%s\n", cfg.APIBase)
+	if cfg.ConsumerKey != "" {
+		fmt.Fprintf(tw, "consumer_key\t%s\n", cfg.ConsumerKey)
+	}
+	if cfg.ConsumerSecret != "" {
+		fmt.Fprintf(tw, "consumer_secret\t%s\n", cfg.ConsumerSecret)
+	}
+	fmt.Fprintf(tw, "defaults.format\t%s\n", cfg.Defaults.Format)
+	fmt.Fprintf(tw, "defaults.list_limit\t%d\n", cfg.Defaults.ListLimit)
+	if cfg.Defaults.ResolveFinalURL != nil {
+		fmt.Fprintf(tw, "defaults.resolve_final_url\t%t\n", *cfg.Defaults.ResolveFinalURL)
+	}
+	if cfg.HasAuth() {
+		fmt.Fprintf(tw, "user.user_id\t%d\n", cfg.User.UserID)
+		fmt.Fprintf(tw, "user.username\t%s\n", cfg.User.Username)
+	}
+	return tw.Flush()
 }
 
 func usageConfig() string {
@@ -1313,4 +1420,17 @@ func usageHighlightsAdd() string {
 
 func usageHighlightsDelete() string {
 	return "Usage:\n  ip highlights delete <highlight_id>\n"
+}
+
+func usageAgent() string {
+	return `AI agent tips:
+  - Use --json for single objects and --ndjson for streams.
+  - Prefer --plain only for line-oriented, human-friendly output.
+  - Rely on exit codes and error hints on stderr for control flow.
+  - For deterministic output, avoid table mode.
+Examples:
+  ip --json auth status
+  ip list --ndjson --limit 0
+  ip list --plain --output bookmarks.txt
+`
 }

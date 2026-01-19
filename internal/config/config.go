@@ -40,7 +40,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		APIBase: DefaultBaseURL(),
 		Defaults: Defaults{
-			ListLimit: 25,
+			ListLimit: 0,
 			Format:    "table",
 		},
 	}
@@ -65,8 +65,8 @@ func Load(path string) (*Config, error) {
 	if c.APIBase == "" {
 		c.APIBase = DefaultBaseURL()
 	}
-	if c.Defaults.ListLimit <= 0 {
-		c.Defaults.ListLimit = 25
+	if c.Defaults.ListLimit < 0 {
+		c.Defaults.ListLimit = 0
 	}
 	if c.Defaults.Format == "" {
 		c.Defaults.Format = "table"

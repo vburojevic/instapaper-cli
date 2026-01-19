@@ -86,10 +86,13 @@ cat urls.txt | ./ip add -
 ./ip list --folder unread --limit 25
 ./ip list --folder archive --format json
 ./ip list --folder archive --json
+./ip list --ndjson
 ./ip list --have "123:0.5:1700000000" --highlights "123,456"
 ./ip list --plain --output bookmarks.txt
 ./ip list --folder "My Folder"  # resolves folder title
 ```
+
+By default, `list` returns all bookmarks (no limit) unless `defaults.list_limit` is set in config.
 
 ## Mutations
 
@@ -136,11 +139,35 @@ cat urls.txt | ./ip add -
 ./ip highlights delete 98765
 ```
 
+## AI agent usage
+
+This CLI is optimized for agent workflows. Use structured output and exit codes for reliable parsing.
+
+- `--json` for single objects (auth status, config, or single operations).
+- `--ndjson` (or `--jsonl`) for streaming lists; each line is a full JSON object.
+- `--plain` for stable, line-oriented text output.
+
+Examples:
+
+```bash
+./ip --json auth status
+./ip --json config show
+./ip list --ndjson --limit 0
+./ip list --plain --output bookmarks.txt
+```
+
 ## Environment variables
 
 - `INSTAPAPER_CONSUMER_KEY`
 - `INSTAPAPER_CONSUMER_SECRET`
 - `INSTAPAPER_API_BASE` (optional; defaults to `https://www.instapaper.com`)
+
+## Troubleshooting
+
+- Auth errors: run `./ip auth status` or `./ip --json auth status` to verify tokens.
+- Rate limits: error code `1040` means retry later; consider backing off.
+- Config issues: `./ip config path` to locate your config; `./ip --json config show` to inspect values.
+- Network problems: try `./ip --debug list --limit 1` to see request timing and status codes.
 
 ## Exit codes
 

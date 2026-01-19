@@ -20,6 +20,17 @@ func PrintBookmarks(w io.Writer, format string, bookmarks []instapaper.Bookmark)
 	switch {
 	case strings.EqualFold(format, "json"):
 		return WriteJSON(w, bookmarks)
+	case isNDJSON(format):
+		for _, b := range bookmarks {
+			line, err := json.Marshal(b)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, string(line)); err != nil {
+				return err
+			}
+		}
+		return nil
 	case strings.EqualFold(format, "plain"):
 		for _, b := range bookmarks {
 			star := "0"
@@ -56,6 +67,17 @@ func PrintFolders(w io.Writer, format string, folders []instapaper.Folder) error
 	switch {
 	case strings.EqualFold(format, "json"):
 		return WriteJSON(w, folders)
+	case isNDJSON(format):
+		for _, f := range folders {
+			line, err := json.Marshal(f)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, string(line)); err != nil {
+				return err
+			}
+		}
+		return nil
 	case strings.EqualFold(format, "plain"):
 		for _, f := range folders {
 			fmt.Fprintf(w, "%d\t%d\t%s\n", int64(f.FolderID), int64(f.Position), oneLine(f.Title))
@@ -74,6 +96,17 @@ func PrintHighlights(w io.Writer, format string, highlights []instapaper.Highlig
 	switch {
 	case strings.EqualFold(format, "json"):
 		return WriteJSON(w, highlights)
+	case isNDJSON(format):
+		for _, h := range highlights {
+			line, err := json.Marshal(h)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w, string(line)); err != nil {
+				return err
+			}
+		}
+		return nil
 	case strings.EqualFold(format, "plain"):
 		for _, h := range highlights {
 			fmt.Fprintf(w, "%d\t%d\t%d\t%s\n",
@@ -109,4 +142,8 @@ func truncateOneLine(s string, max int) string {
 func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	return strings.TrimSpace(s)
+}
+
+func isNDJSON(format string) bool {
+	return strings.EqualFold(format, "ndjson") || strings.EqualFold(format, "jsonl")
 }

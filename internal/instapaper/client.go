@@ -50,10 +50,13 @@ func (e *APIError) Error() string {
 	if e == nil {
 		return ""
 	}
-	if e.Code != 0 {
-		return fmt.Sprintf("Instapaper API error %d", e.Code)
+	if e.Code == 0 {
+		return "Instapaper API error"
 	}
-	return "Instapaper API error"
+	if e.Message != "" {
+		return fmt.Sprintf("Instapaper API error %d: %s", e.Code, e.Message)
+	}
+	return fmt.Sprintf("Instapaper API error %d", e.Code)
 }
 
 // postForm signs and posts an application/x-www-form-urlencoded request.

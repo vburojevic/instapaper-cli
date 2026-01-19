@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vburojevic/instapaper-cli/internal/config"
 	"github.com/vburojevic/instapaper-cli/internal/instapaper"
 )
 
@@ -22,6 +23,13 @@ func tempConfigArg(t *testing.T) []string {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.json")
 	return []string{"--config", cfg}
+}
+
+func writeConfig(t *testing.T, path string, cfg *config.Config) {
+	t.Helper()
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save config: %v", err)
+	}
 }
 
 func TestHelpAndVersion(t *testing.T) {
@@ -84,6 +92,52 @@ func TestConfigPath(t *testing.T) {
 	}
 	if strings.TrimSpace(out) == "" {
 		t.Fatalf("config path output empty")
+	}
+}
+
+func TestConfigShowTable(t *testing.T) {
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.json")
+	cfg := config.DefaultConfig()
+	cfg.ConsumerKey = "ck"
+	cfg.ConsumerSecret = "cs"
+	writeConfig(t, cfgPath, cfg)
+
+	code, out, _ := runCmd(t, "ip", "--config", cfgPath, "config", "show")
+	if code != 0 {
+		t.Fatalf("config show exit=%d", code)
+	}
+	if !strings.Contains(out, "api_base") {
+		t.Fatalf("expected api_base in output: %s", out)
+	}
+}
+
+func TestConfigShowJSON(t *testing.T) {
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.json")
+	cfg := config.DefaultConfig()
+	writeConfig(t, cfgPath, cfg)
+
+	code, out, _ := runCmd(t, "ip", "--config", cfgPath, "--json", "config", "show")
+	if code != 0 {
+		t.Fatalf("config show json exit=%d", code)
+	}
+	if !strings.Contains(out, "\"api_base\"") {
+		t.Fatalf("expected json output, got: %s", out)
+	}
+}
+
+func TestAuthStatusJSON(t *testing.T) {
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.json")
+	writeConfig(t, cfgPath, config.DefaultConfig())
+
+	code, out, _ := runCmd(t, "ip", "--config", cfgPath, "--json", "auth", "status")
+	if code != 0 {
+		t.Fatalf("auth status json exit=%d", code)
+	}
+	if !strings.Contains(out, "\"logged_in\"") {
+		t.Fatalf("expected json output, got: %s", out)
 	}
 }
 
