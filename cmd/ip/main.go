@@ -30,6 +30,7 @@ type GlobalOptions struct {
 	ConfigPath   string
 	Format       string
 	Quiet        bool
+	Verbose      bool
 	Debug        bool
 	DebugJSON    bool
 	Timeout      time.Duration
@@ -89,6 +90,7 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	global.StringVar(&opts.ConfigPath, "config", "", "Path to config file (default: user config dir)")
 	global.StringVar(&opts.Format, "format", "", "Output format: table, plain, json, or ndjson")
 	global.BoolVar(&opts.Quiet, "quiet", false, "Less output")
+	global.BoolVar(&opts.Verbose, "verbose", false, "More output")
 	global.BoolVar(&opts.Debug, "debug", false, "Debug output (never prints secrets)")
 	global.BoolVar(&opts.DebugJSON, "debug-json", false, "Debug output as JSON lines")
 	global.Var(&timeoutFlag, "timeout", "HTTP timeout")
@@ -271,6 +273,7 @@ Global flags:
   --debug               Debug output
   --debug-json          Debug output as JSON lines
   --quiet               Less output
+  --verbose             More output
   --dry-run             Preview actions without making changes
   --idempotent          Ignore already-in-state errors when possible
   -h, --help            Show help
@@ -282,8 +285,8 @@ Commands:
   config path|show|get|set|unset
   auth login|status|logout
   add <url|-> [--folder <id|"Title">] [--title ...] [--tags "a,b"]
-  list [--folder unread|starred|archive|<id>|"Title"] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>|--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N]
-  export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>|--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N]
+  list [--folder unread|starred|archive|<id>|"Title"] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>|--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N] [--select <expr>]
+  export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>|--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N] [--select <expr>] [--output-dir <dir>]
   import [--input-format plain|csv|ndjson] [--input <file>|-]
   help ai|agent
   progress <bookmark_id> --progress <0..1> --timestamp <unix>
@@ -954,6 +957,7 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	var until string
 	var updatedSince string
 	var maxPages int
+	var selectExpr string
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.StringVar(&folder, "folder", "unread", "Folder: unread|starred|archive|<id>|\"Title\"")
@@ -968,6 +972,7 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	fs.StringVar(&until, "until", "", "Filter bookmarks up to a bound (bookmark_id:<id> or time:<rfc3339|unix>)")
 	fs.StringVar(&updatedSince, "updated-since", "", "Filter by updated time (progress_timestamp or time)")
 	fs.IntVar(&maxPages, "max-pages", 200, "Max pages when --limit is 0")
+	fs.StringVar(&selectExpr, "select", "", "Filter results client-side (e.g. starred=1,tag~news)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1035,6 +1040,14 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 		return printError(stderr, err)
 	}
 	resp.Bookmarks = filterBookmarksByBounds(resp.Bookmarks, sinceBound, untilBound)
+	if selectExpr != "" {
+		filtered, err := filterBookmarksBySelect(resp.Bookmarks, selectExpr)
+		if err != nil {
+			return printUsageError(stderr, err.Error())
+		}
+		resp.Bookmarks = filtered
+	}
+	verbosef(opts, stderr, "list: bookmarks=%d", len(resp.Bookmarks))
 	if fields != "" && (strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format)) {
 		if err := output.PrintBookmarksWithFields(stdout, opts.Format, resp.Bookmarks, fields); err != nil {
 			return printError(stderr, err)
@@ -1062,6 +1075,8 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	var until string
 	var updatedSince string
 	var maxPages int
+	var selectExpr string
+	var outputDir string
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.StringVar(&folder, "folder", "unread", "Folder: unread|starred|archive|<id>|\"Title\"")
@@ -1075,6 +1090,8 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	fs.StringVar(&until, "until", "", "Filter bookmarks up to a bound (bookmark_id:<id> or time:<rfc3339|unix>)")
 	fs.StringVar(&updatedSince, "updated-since", "", "Filter by updated time (progress_timestamp or time)")
 	fs.IntVar(&maxPages, "max-pages", 200, "Max pages when --limit is 0")
+	fs.StringVar(&selectExpr, "select", "", "Filter results client-side (e.g. starred=1,tag~news)")
+	fs.StringVar(&outputDir, "output-dir", "", "Write each page as NDJSON into this directory")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1093,6 +1110,12 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	}
 	if since != "" && updatedSince != "" {
 		return printUsageError(stderr, "use only one of --since or --updated-since")
+	}
+	if outputDir != "" && opts.OutputPath != "" {
+		return printUsageError(stderr, "--output and --output-dir cannot be used together")
+	}
+	if outputDir != "" && !isNDJSONFormat(opts.Format) {
+		return printUsageError(stderr, "--output-dir requires --format ndjson")
 	}
 
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
@@ -1127,6 +1150,21 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 		return printUsageError(stderr, err.Error())
 	}
 
+	var pageWriter *pagedExportWriter
+	if outputDir != "" {
+		pageWriter, err = newPagedExportWriter(outputDir, folderID, tag, fields)
+		if err != nil {
+			return printError(stderr, err)
+		}
+	}
+	var selectFilters []selectFilter
+	if selectExpr != "" {
+		selectFilters, err = parseSelectExpr(selectExpr)
+		if err != nil {
+			return printUsageError(stderr, err.Error())
+		}
+	}
+
 	resp, err := listBookmarks(ctx, client, listBookmarksParams{
 		Limit:      limit,
 		FolderID:   folderID,
@@ -1135,11 +1173,35 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 		Fields:     fields,
 		CursorPath: cursorPath,
 		MaxPages:   maxPages,
+		PageHandler: func(page []instapaper.Bookmark, pageIndex int) error {
+			if pageWriter == nil {
+				return nil
+			}
+			filtered := filterBookmarksByBounds(page, sinceBound, untilBound)
+			if len(selectFilters) > 0 {
+				filtered = filterBookmarksBySelectFilters(filtered, selectFilters)
+			}
+			if len(filtered) == 0 {
+				return nil
+			}
+			return pageWriter.WritePage(pageIndex, filtered)
+		},
+		DiscardOutput: outputDir != "",
 	})
 	if err != nil {
 		return printError(stderr, err)
 	}
+	if outputDir != "" {
+		if pageWriter != nil && !opts.Quiet {
+			fmt.Fprintf(stdout, "Wrote %d pages to %s\n", pageWriter.pages, outputDir)
+		}
+		return 0
+	}
 	resp.Bookmarks = filterBookmarksByBounds(resp.Bookmarks, sinceBound, untilBound)
+	if len(selectFilters) > 0 {
+		resp.Bookmarks = filterBookmarksBySelectFilters(resp.Bookmarks, selectFilters)
+	}
+	verbosef(opts, stderr, "export: bookmarks=%d", len(resp.Bookmarks))
 	if fields != "" && (strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format)) {
 		if err := output.PrintBookmarksWithFields(stdout, opts.Format, resp.Bookmarks, fields); err != nil {
 			return printError(stderr, err)
@@ -1346,14 +1408,16 @@ func runTags(args []string, stdout, stderr io.Writer) int {
 }
 
 type listBookmarksParams struct {
-	Limit      int
-	FolderID   string
-	Tag        string
-	Have       string
-	Highlights string
-	Fields     string
-	CursorPath string
-	MaxPages   int
+	Limit         int
+	FolderID      string
+	Tag           string
+	Have          string
+	Highlights    string
+	Fields        string
+	CursorPath    string
+	MaxPages      int
+	PageHandler   func([]instapaper.Bookmark, int) error
+	DiscardOutput bool
 }
 
 type cursorEntry struct {
@@ -1416,9 +1480,16 @@ func listBookmarks(ctx context.Context, client *instapaper.Client, params listBo
 			return resp, err
 		}
 		resp.User = r.User
-		resp.Bookmarks = append(resp.Bookmarks, r.Bookmarks...)
+		if !params.DiscardOutput {
+			resp.Bookmarks = append(resp.Bookmarks, r.Bookmarks...)
+		}
 		resp.Highlights = append(resp.Highlights, r.Highlights...)
 		resp.DeleteIDs = append(resp.DeleteIDs, r.DeleteIDs...)
+		if params.PageHandler != nil {
+			if err := params.PageHandler(r.Bookmarks, pages); err != nil {
+				return resp, err
+			}
+		}
 		if cursor != nil {
 			updateCursor(cursor, r.Bookmarks, r.DeleteIDs)
 			have = haveStringFromCursor(cursor)
@@ -2533,6 +2604,62 @@ func sanitizeFilename(name string) string {
 	return out
 }
 
+type pagedExportWriter struct {
+	dir    string
+	prefix string
+	fields string
+	pages  int
+}
+
+func newPagedExportWriter(dir, folderID, tag, fields string) (*pagedExportWriter, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("output dir is empty")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	name := exportTargetName(folderID, tag)
+	return &pagedExportWriter{
+		dir:    dir,
+		prefix: sanitizeFilename(name),
+		fields: fields,
+	}, nil
+}
+
+func (w *pagedExportWriter) WritePage(pageIndex int, bookmarks []instapaper.Bookmark) error {
+	if len(bookmarks) == 0 {
+		return nil
+	}
+	filename := fmt.Sprintf("%s-%04d.ndjson", w.prefix, pageIndex)
+	path := filepath.Join(w.dir, filename)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if w.fields != "" {
+		if err := output.PrintBookmarksWithFields(f, "ndjson", bookmarks, w.fields); err != nil {
+			return err
+		}
+	} else {
+		if err := output.PrintBookmarks(f, "ndjson", bookmarks); err != nil {
+			return err
+		}
+	}
+	w.pages++
+	return nil
+}
+
+func exportTargetName(folderID, tag string) string {
+	if tag != "" {
+		return "tag-" + tag
+	}
+	if folderID != "" {
+		return "folder-" + folderID
+	}
+	return "unread"
+}
+
 type progressEmitter struct {
 	enabled bool
 	writer  io.Writer
@@ -2714,6 +2841,250 @@ func emitDryRunIDs(w io.Writer, format, action string, ids []int64) int {
 		fmt.Fprintf(w, "DRY RUN: %s %d\n", action, id)
 	}
 	return 0
+}
+
+func verbosef(opts *GlobalOptions, stderr io.Writer, format string, args ...any) {
+	if opts == nil || !opts.Verbose || opts.Quiet {
+		return
+	}
+	fmt.Fprintf(stderr, format+"\n", args...)
+}
+
+type selectFilter struct {
+	Field string
+	Op    string
+	Value string
+}
+
+func filterBookmarksBySelect(bookmarks []instapaper.Bookmark, expr string) ([]instapaper.Bookmark, error) {
+	filters, err := parseSelectExpr(expr)
+	if err != nil {
+		return nil, err
+	}
+	return filterBookmarksBySelectFilters(bookmarks, filters), nil
+}
+
+func filterBookmarksBySelectFilters(bookmarks []instapaper.Bookmark, filters []selectFilter) []instapaper.Bookmark {
+	if len(filters) == 0 {
+		return bookmarks
+	}
+	out := make([]instapaper.Bookmark, 0, len(bookmarks))
+	for _, b := range bookmarks {
+		if matchSelectFilters(b, filters) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+func parseSelectExpr(expr string) ([]selectFilter, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil, nil
+	}
+	parts := strings.Split(expr, ",")
+	filters := make([]selectFilter, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		field, op, value, err := splitFilter(part)
+		if err != nil {
+			return nil, err
+		}
+		filter := selectFilter{Field: field, Op: op, Value: value}
+		if err := validateSelectFilter(filter); err != nil {
+			return nil, err
+		}
+		filters = append(filters, filter)
+	}
+	return filters, nil
+}
+
+func splitFilter(expr string) (string, string, string, error) {
+	var op string
+	switch {
+	case strings.Contains(expr, "!="):
+		op = "!="
+	case strings.Contains(expr, "~"):
+		op = "~"
+	case strings.Contains(expr, "="):
+		op = "="
+	default:
+		return "", "", "", fmt.Errorf("invalid select filter: %s", expr)
+	}
+	parts := strings.SplitN(expr, op, 2)
+	if len(parts) != 2 {
+		return "", "", "", fmt.Errorf("invalid select filter: %s", expr)
+	}
+	field := strings.ToLower(strings.TrimSpace(parts[0]))
+	value := strings.TrimSpace(parts[1])
+	if field == "" || value == "" {
+		return "", "", "", fmt.Errorf("invalid select filter: %s", expr)
+	}
+	field = normalizeSelectField(field)
+	return field, op, value, nil
+}
+
+func normalizeSelectField(field string) string {
+	switch field {
+	case "id", "bookmark", "bookmarkid", "bookmark_id":
+		return "bookmark_id"
+	case "progress_ts", "progress_timestamp":
+		return "progress_timestamp"
+	case "tag", "tags":
+		return "tags"
+	case "star", "starred":
+		return "starred"
+	default:
+		return field
+	}
+}
+
+func validateSelectFilter(f selectFilter) error {
+	switch f.Field {
+	case "bookmark_id", "time", "progress_timestamp":
+		if f.Op != "=" && f.Op != "!=" {
+			return fmt.Errorf("unsupported operator for %s: %s", f.Field, f.Op)
+		}
+		if _, err := strconv.ParseInt(f.Value, 10, 64); err != nil {
+			return fmt.Errorf("invalid numeric value for %s: %s", f.Field, f.Value)
+		}
+	case "progress":
+		if f.Op != "=" && f.Op != "!=" {
+			return fmt.Errorf("unsupported operator for %s: %s", f.Field, f.Op)
+		}
+		if _, err := strconv.ParseFloat(f.Value, 64); err != nil {
+			return fmt.Errorf("invalid numeric value for %s: %s", f.Field, f.Value)
+		}
+	case "starred":
+		if f.Op != "=" && f.Op != "!=" {
+			return fmt.Errorf("unsupported operator for %s: %s", f.Field, f.Op)
+		}
+		if _, err := parseBool(f.Value); err != nil {
+			return fmt.Errorf("invalid boolean value for %s: %s", f.Field, f.Value)
+		}
+	case "title", "url", "description", "tags":
+		if f.Op != "=" && f.Op != "!=" && f.Op != "~" {
+			return fmt.Errorf("unsupported operator for %s: %s", f.Field, f.Op)
+		}
+	default:
+		return fmt.Errorf("unknown select field: %s", f.Field)
+	}
+	return nil
+}
+
+func matchSelectFilters(b instapaper.Bookmark, filters []selectFilter) bool {
+	for _, f := range filters {
+		if !matchSelectFilter(b, f) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchSelectFilter(b instapaper.Bookmark, f selectFilter) bool {
+	switch f.Field {
+	case "bookmark_id":
+		return matchInt64(int64(b.BookmarkID), f)
+	case "time":
+		return matchInt64(int64(b.Time), f)
+	case "progress_timestamp":
+		return matchInt64(int64(b.ProgressTimestamp), f)
+	case "progress":
+		return matchFloat64(float64(b.Progress), f)
+	case "starred":
+		return matchBool(bool(b.Starred), f)
+	case "title":
+		return matchString(b.Title, f)
+	case "url":
+		return matchString(b.URL, f)
+	case "description":
+		return matchString(b.Description, f)
+	case "tags":
+		return matchTags(b.Tags, f)
+	default:
+		return false
+	}
+}
+
+func matchInt64(value int64, f selectFilter) bool {
+	v, err := strconv.ParseInt(f.Value, 10, 64)
+	if err != nil {
+		return false
+	}
+	switch f.Op {
+	case "=":
+		return value == v
+	case "!=":
+		return value != v
+	default:
+		return false
+	}
+}
+
+func matchFloat64(value float64, f selectFilter) bool {
+	v, err := strconv.ParseFloat(f.Value, 64)
+	if err != nil {
+		return false
+	}
+	switch f.Op {
+	case "=":
+		return value == v
+	case "!=":
+		return value != v
+	default:
+		return false
+	}
+}
+
+func matchBool(value bool, f selectFilter) bool {
+	v, err := parseBool(f.Value)
+	if err != nil {
+		return false
+	}
+	switch f.Op {
+	case "=":
+		return value == v
+	case "!=":
+		return value != v
+	default:
+		return false
+	}
+}
+
+func matchString(value string, f selectFilter) bool {
+	switch f.Op {
+	case "=":
+		return strings.EqualFold(value, f.Value)
+	case "!=":
+		return !strings.EqualFold(value, f.Value)
+	case "~":
+		return strings.Contains(strings.ToLower(value), strings.ToLower(f.Value))
+	default:
+		return false
+	}
+}
+
+func matchTags(tags []instapaper.Tag, f selectFilter) bool {
+	for _, tag := range tags {
+		switch f.Op {
+		case "=":
+			if strings.EqualFold(tag.Name, f.Value) {
+				return true
+			}
+		case "!=":
+			if strings.EqualFold(tag.Name, f.Value) {
+				return false
+			}
+		case "~":
+			if strings.Contains(strings.ToLower(tag.Name), strings.ToLower(f.Value)) {
+				return true
+			}
+		}
+	}
+	return f.Op == "!="
 }
 
 func printConfig(w io.Writer, cfg *config.Config) error {
@@ -3243,11 +3614,11 @@ func usageAdd() string {
 }
 
 func usageList() string {
-	return "Usage:\n  ip list [--folder ...] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>] [--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N]\n"
+	return "Usage:\n  ip list [--folder ...] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>] [--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N] [--select <expr>]\n"
 }
 
 func usageExport() string {
-	return "Usage:\n  ip export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>] [--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N]\n"
+	return "Usage:\n  ip export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>] [--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N] [--select <expr>] [--output-dir <dir>]\n"
 }
 
 func usageImport() string {
@@ -3332,10 +3703,12 @@ func usageAgent() string {
   - Use --since/--until or --updated-since to slice lists without cursors.
   - Use --cursor-dir for automatic incremental sync files.
   - Use --ids or --stdin for bulk mutations; add --progress-json for progress events.
+  - Use --select to client-filter results when API filters are missing.
 Examples:
   ip --json auth status
   ip list --ndjson --limit 0 --max-pages 50
   ip list --updated-since 2025-01-01T00:00:00Z
+  ip list --select "starred=1,tag~news"
   ip list --plain --output bookmarks.txt
 `
 }

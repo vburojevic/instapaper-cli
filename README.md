@@ -11,6 +11,7 @@ Features:
 - Health/verify checks, JSON schema output
 - NDJSON/JSON/plain output, structured stderr (`--stderr-json`), retries, dry-run, idempotent mode
 - Incremental sync (cursor files or bounds), bulk operations, and progress events
+- Client-side filtering (`--select`), verbose summaries, and paged exports
 
 ## Install
 
@@ -119,6 +120,7 @@ cat urls.txt | ./ip add -
 ./ip list --until time:2025-01-01T00:00:00Z
 ./ip list --updated-since 2025-01-01T00:00:00Z
 ./ip list --limit 0 --max-pages 50
+./ip list --select "starred=1,tag~news"
 ./ip list --plain --output bookmarks.txt
 ./ip list --folder "My Folder"  # resolves folder title
 ```
@@ -130,6 +132,11 @@ Bounds format for `--since/--until`:
 - `time:<rfc3339|unix>`
 - `progress_timestamp:<rfc3339|unix>`
 
+Select format for `--select`:
+- Comma-separated filters: `<field><op><value>`
+- Operators: `=`, `!=`, `~` (contains, case-insensitive)
+- Fields: `bookmark_id`, `time`, `progress`, `progress_timestamp`, `starred`, `title`, `url`, `description`, `tags`
+
 ## Output formats
 
 - `--ndjson` (default): one JSON object per line (stream-friendly).
@@ -138,6 +145,8 @@ Bounds format for `--since/--until`:
 - `--format table`: human table (avoid for parsing).
 
 Use `--output <file>` to write results to a file. Use `-` for stdout.
+Use `--output-dir <dir>` on `export` to write each page as its own NDJSON file.
+Use `--verbose` to emit summary counts to stderr (keeps stdout clean).
 
 ## Mutations
 
@@ -210,6 +219,11 @@ printf "1\n2\n3\n" | ./ip text --stdin --out ./articles
 # Export with specific fields
 ./ip export --fields "bookmark_id,title,url" --ndjson
 
+# Export into a directory (paged NDJSON files)
+./ip export --output-dir ./exports --cursor-dir ~/.config/ip/cursors
+
+# Note: --output-dir requires NDJSON output (default)
+
 # Import from plain text (one URL per line)
 ./ip import --input urls.txt --input-format plain
 
@@ -261,6 +275,7 @@ This CLI is optimized for agent workflows. Default output is NDJSON; use structu
 - Use `--since/--until` or `--updated-since` for deterministic incremental pulls.
 - Use `--cursor-dir` for auto cursor files per folder/tag.
 - Use `--ids` or `--stdin` for bulk mutations; `--progress-json` for progress events.
+- Use `--select` for client-side filtering when the API doesn't support it.
 
 Examples:
 

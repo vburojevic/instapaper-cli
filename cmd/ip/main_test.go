@@ -204,3 +204,27 @@ func TestFilterBookmarksByBounds(t *testing.T) {
 		t.Fatalf("unexpected filtered result: %+v", filtered)
 	}
 }
+
+func TestFilterBookmarksBySelect(t *testing.T) {
+	bookmarks := []instapaper.Bookmark{
+		{
+			BookmarkID: 1,
+			Title:      "Hello World",
+			Starred:    instapaper.BoolInt(true),
+			Tags:       []instapaper.Tag{{Name: "news"}},
+		},
+		{
+			BookmarkID: 2,
+			Title:      "Other",
+			Starred:    instapaper.BoolInt(false),
+			Tags:       []instapaper.Tag{{Name: "misc"}},
+		},
+	}
+	filtered, err := filterBookmarksBySelect(bookmarks, "starred=1,tag~news")
+	if err != nil {
+		t.Fatalf("select filter: %v", err)
+	}
+	if len(filtered) != 1 || int64(filtered[0].BookmarkID) != 1 {
+		t.Fatalf("unexpected select result: %+v", filtered)
+	}
+}
