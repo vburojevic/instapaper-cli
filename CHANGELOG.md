@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-01-19
+- Accept float timestamps in integer fields.
+- Extend tests for float parsing and flag ordering.
+
 ## [0.2.5] - 2026-01-19
 - Allow flags after positional args for flag-based commands (add/list/export/progress/etc).
 - Add tests for folder position floats and flag reordering.

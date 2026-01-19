@@ -17,3 +17,20 @@ func TestFolderPositionFloat(t *testing.T) {
 		t.Fatalf("position=%v want=%v diff=%v", f.Position, want, diff)
 	}
 }
+
+func TestInt64UnmarshalFloat(t *testing.T) {
+	var v Int64
+	if err := json.Unmarshal([]byte(`1768856911.4784305`), &v); err != nil {
+		t.Fatalf("unmarshal float: %v", err)
+	}
+	if int64(v) != 1768856911 {
+		t.Fatalf("value=%d", int64(v))
+	}
+
+	if err := json.Unmarshal([]byte(`"1768856911.4784305"`), &v); err != nil {
+		t.Fatalf("unmarshal float string: %v", err)
+	}
+	if int64(v) != 1768856911 {
+		t.Fatalf("value=%d", int64(v))
+	}
+}

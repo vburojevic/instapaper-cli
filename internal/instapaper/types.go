@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 )
 
@@ -26,11 +27,18 @@ func (i *Int64) UnmarshalJSON(b []byte) error {
 			*i = 0
 			return nil
 		}
-		v, err := strconv.ParseInt(s, 10, 64)
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+			*i = Int64(v)
+			return nil
+		}
+		fv, err := strconv.ParseFloat(s, 64)
 		if err != nil {
 			return fmt.Errorf("parse int64 from %q: %w", s, err)
 		}
-		*i = Int64(v)
+		if math.IsNaN(fv) || math.IsInf(fv, 0) {
+			return fmt.Errorf("parse int64 from %q: invalid float", s)
+		}
+		*i = Int64(int64(fv))
 		return nil
 	}
 	// Number
@@ -40,7 +48,15 @@ func (i *Int64) UnmarshalJSON(b []byte) error {
 	}
 	v, err := n.Int64()
 	if err != nil {
-		return fmt.Errorf("parse int64 from %q: %w", n.String(), err)
+		fv, ferr := n.Float64()
+		if ferr != nil {
+			return fmt.Errorf("parse int64 from %q: %w", n.String(), err)
+		}
+		if math.IsNaN(fv) || math.IsInf(fv, 0) {
+			return fmt.Errorf("parse int64 from %q: invalid float", n.String())
+		}
+		*i = Int64(int64(fv))
+		return nil
 	}
 	*i = Int64(v)
 	return nil

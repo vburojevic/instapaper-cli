@@ -258,3 +258,19 @@ func TestProgressAcceptsFlagsAfterPositional(t *testing.T) {
 		t.Fatalf("progress with trailing flags exit=%d err=%s", code, errOut)
 	}
 }
+
+func TestFoldersDeleteAcceptsFlagsAfterPositional(t *testing.T) {
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.json")
+	cfg := config.DefaultConfig()
+	cfg.ConsumerKey = "ck"
+	cfg.ConsumerSecret = "cs"
+	cfg.OAuthToken = "tok"
+	cfg.OAuthTokenSecret = "sec"
+	writeConfig(t, cfgPath, cfg)
+	args := []string{"ip", "--config", cfgPath}
+	code, _, errOut := runCmd(t, append(args, "--dry-run", "folders", "delete", "123", "--confirm", "123")...)
+	if code != 0 {
+		t.Fatalf("folders delete with trailing flag exit=%d err=%s", code, errOut)
+	}
+}
