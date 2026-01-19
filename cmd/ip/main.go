@@ -13,13 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/example/instapaper-cli/internal/browser"
-	"github.com/example/instapaper-cli/internal/config"
-	"github.com/example/instapaper-cli/internal/instapaper"
-	"github.com/example/instapaper-cli/internal/oauth1"
-	"github.com/example/instapaper-cli/internal/output"
-	"github.com/example/instapaper-cli/internal/prompt"
-	"github.com/example/instapaper-cli/internal/version"
+	"github.com/vburojevic/instapaper-cli/internal/browser"
+	"github.com/vburojevic/instapaper-cli/internal/config"
+	"github.com/vburojevic/instapaper-cli/internal/instapaper"
+	"github.com/vburojevic/instapaper-cli/internal/oauth1"
+	"github.com/vburojevic/instapaper-cli/internal/output"
+	"github.com/vburojevic/instapaper-cli/internal/prompt"
+	"github.com/vburojevic/instapaper-cli/internal/version"
 )
 
 type GlobalOptions struct {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/example/instapaper-cli/internal/instapaper"
+	"github.com/vburojevic/instapaper-cli/internal/instapaper"
 )
 
 func runCmd(t *testing.T, args ...string) (int, string, string) {

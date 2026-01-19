@@ -12,7 +12,7 @@ Features:
 ## Install
 
 ```bash
-go install github.com/example/instapaper-cli/cmd/ip@latest
+go install github.com/vburojevic/instapaper-cli/cmd/ip@latest
 ip version
 ```
 

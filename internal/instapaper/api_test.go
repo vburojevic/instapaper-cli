@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/instapaper-cli/internal/oauth1"
+	"github.com/vburojevic/instapaper-cli/internal/oauth1"
 )
 
 func newTestClient(t *testing.T, baseURL string, token *oauth1.Token) *Client {

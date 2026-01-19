@@ -7,7 +7,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/example/instapaper-cli/internal/instapaper"
+	"github.com/vburojevic/instapaper-cli/internal/instapaper"
 )
 
 func WriteJSON(w io.Writer, v any) error {

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/example/instapaper-cli/internal/instapaper"
+	"github.com/vburojevic/instapaper-cli/internal/instapaper"
 )
 
 func readGolden(t *testing.T, name string) string {

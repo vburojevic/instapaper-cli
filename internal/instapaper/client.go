@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/example/instapaper-cli/internal/oauth1"
+	"github.com/vburojevic/instapaper-cli/internal/oauth1"
 )
 
 type Client struct {
