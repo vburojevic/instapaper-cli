@@ -31,3 +31,9 @@
 - Never store Instapaper passwords. Use `--password-stdin` for auth and env vars for keys.
 - Relevant env vars: `INSTAPAPER_CONSUMER_KEY`, `INSTAPAPER_CONSUMER_SECRET`, `INSTAPAPER_API_BASE`.
 - Config lives in the user config directory (`ip config path`).
+
+## API Reference
+- Official Instapaper API documentation:
+  ```
+  https://www.instapaper.com/api
+  ```

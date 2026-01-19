@@ -335,6 +335,7 @@ func (c *Client) GetTextHTML(ctx context.Context, bookmarkID int64) ([]byte, err
 	ct := headers.Get("Content-Type")
 	if !strings.Contains(ct, "text/html") {
 		// Sometimes proxies might alter it; still return body.
+		return b, nil
 	}
 	return b, nil
 }

@@ -713,8 +713,6 @@ func runAuthLogin(ctx context.Context, args []string, opts *GlobalOptions, cfg *
 		client.SetRetry(opts.RetryCount, opts.RetryBackoff)
 	}
 	ok, sk, err := client.XAuthAccessToken(ctx, username, password)
-	// Discard password ASAP.
-	password = ""
 	if err != nil {
 		return printError(stderr, err)
 	}

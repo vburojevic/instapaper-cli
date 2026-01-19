@@ -38,6 +38,20 @@ func readForm(t *testing.T, r *http.Request) url.Values {
 	return r.Form
 }
 
+func writeString(t *testing.T, w io.Writer, s string) {
+	t.Helper()
+	if _, err := io.WriteString(w, s); err != nil {
+		t.Fatalf("write string: %v", err)
+	}
+}
+
+func writeBytes(t *testing.T, w io.Writer, b []byte) {
+	t.Helper()
+	if _, err := w.Write(b); err != nil {
+		t.Fatalf("write bytes: %v", err)
+	}
+}
+
 func TestXAuthAccessToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -47,7 +61,7 @@ func TestXAuthAccessToken(t *testing.T) {
 			t.Fatalf("path=%s", r.URL.Path)
 		}
 		requireAuthHeader(t, r)
-		io.WriteString(w, "oauth_token=tok&oauth_token_secret=sec")
+		writeString(t, w, "oauth_token=tok&oauth_token_secret=sec")
 	}))
 	defer srv.Close()
 
@@ -75,7 +89,7 @@ func TestVerifyCredentials(t *testing.T) {
 		}
 		requireAuthHeader(t, r)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		writeBytes(t, w, body)
 	}))
 	defer srv.Close()
 
@@ -131,7 +145,7 @@ func TestListBookmarksObjectResponse(t *testing.T) {
 			t.Fatalf("highlights=%s", form.Get("highlights"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		writeBytes(t, w, body)
 	}))
 	defer srv.Close()
 
@@ -174,7 +188,7 @@ func TestListBookmarksArrayResponse(t *testing.T) {
 		}
 		requireAuthHeader(t, r)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		writeBytes(t, w, body)
 	}))
 	defer srv.Close()
 
@@ -195,7 +209,7 @@ func TestListBookmarksAPIErrorArray(t *testing.T) {
 	errBody := `[ { "type": "error", "error_code": 1240, "message": "Invalid" } ]`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, errBody)
+		writeString(t, w, errBody)
 	}))
 	defer srv.Close()
 
@@ -230,7 +244,7 @@ func TestAddBookmarkTags(t *testing.T) {
 			t.Fatalf("tags=%v", tags)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		writeBytes(t, w, body)
 	}))
 	defer srv.Close()
 
@@ -264,7 +278,7 @@ func TestUpdateReadProgress(t *testing.T) {
 			t.Fatalf("progress_timestamp=%s", form.Get("progress_timestamp"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		writeBytes(t, w, body)
 	}))
 	defer srv.Close()
 
@@ -329,7 +343,7 @@ func TestSimpleBookmarkMutations(t *testing.T) {
 					t.Fatalf("bookmark_id=%s", form.Get("bookmark_id"))
 				}
 				w.Header().Set("Content-Type", "application/json")
-				w.Write(body)
+				writeBytes(t, w, body)
 			}))
 			defer srv.Close()
 
@@ -355,7 +369,7 @@ func TestMoveBookmark(t *testing.T) {
 			t.Fatalf("form=%v", form)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		writeBytes(t, w, body)
 	}))
 	defer srv.Close()
 
@@ -376,7 +390,7 @@ func TestDeleteBookmark(t *testing.T) {
 		if form.Get("bookmark_id") != "1" {
 			t.Fatalf("bookmark_id=%s", form.Get("bookmark_id"))
 		}
-		io.WriteString(w, "[]")
+		writeString(t, w, "[]")
 	}))
 	defer srv.Close()
 
@@ -394,7 +408,7 @@ func TestGetTextHTML(t *testing.T) {
 		}
 		requireAuthHeader(t, r)
 		w.Header().Set("Content-Type", "text/html")
-		io.WriteString(w, content)
+		writeString(t, w, content)
 	}))
 	defer srv.Close()
 
@@ -415,7 +429,7 @@ func TestFoldersEndpoints(t *testing.T) {
 		case "/api/1/folders/list":
 			resp := []map[string]any{{"type": "folder", "folder_id": 1, "title": "A", "position": 1}}
 			body, _ := json.Marshal(resp)
-			w.Write(body)
+			writeBytes(t, w, body)
 		case "/api/1/folders/add":
 			form := readForm(t, r)
 			if form.Get("title") != "New" {
@@ -423,13 +437,13 @@ func TestFoldersEndpoints(t *testing.T) {
 			}
 			resp := []map[string]any{{"type": "folder", "folder_id": 2, "title": "New", "position": 2}}
 			body, _ := json.Marshal(resp)
-			w.Write(body)
+			writeBytes(t, w, body)
 		case "/api/1/folders/delete":
 			form := readForm(t, r)
 			if form.Get("folder_id") != "2" {
 				t.Fatalf("folder_id=%s", form.Get("folder_id"))
 			}
-			io.WriteString(w, "[]")
+			writeString(t, w, "[]")
 		case "/api/1/folders/set_order":
 			form := readForm(t, r)
 			if form.Get("order") != "1:1,2:2" {
@@ -437,7 +451,7 @@ func TestFoldersEndpoints(t *testing.T) {
 			}
 			resp := []map[string]any{{"type": "folder", "folder_id": 1, "title": "A", "position": 1}}
 			body, _ := json.Marshal(resp)
-			w.Write(body)
+			writeBytes(t, w, body)
 		default:
 			t.Fatalf("path=%s", r.URL.Path)
 		}
@@ -466,7 +480,7 @@ func TestHighlightsEndpoints(t *testing.T) {
 		case strings.HasPrefix(r.URL.Path, "/api/1.1/bookmarks/") && strings.HasSuffix(r.URL.Path, "/highlights"):
 			resp := []map[string]any{{"type": "highlight", "highlight_id": 1, "bookmark_id": 9, "text": "hi", "time": 0, "position": 0}}
 			body, _ := json.Marshal(resp)
-			w.Write(body)
+			writeBytes(t, w, body)
 		case strings.HasPrefix(r.URL.Path, "/api/1.1/bookmarks/") && strings.HasSuffix(r.URL.Path, "/highlight"):
 			form := readForm(t, r)
 			if form.Get("text") != "quote" {
@@ -474,9 +488,9 @@ func TestHighlightsEndpoints(t *testing.T) {
 			}
 			resp := []map[string]any{{"type": "highlight", "highlight_id": 2, "bookmark_id": 9, "text": "quote", "time": 0, "position": 0}}
 			body, _ := json.Marshal(resp)
-			w.Write(body)
+			writeBytes(t, w, body)
 		case strings.HasPrefix(r.URL.Path, "/api/1.1/highlights/") && strings.HasSuffix(r.URL.Path, "/delete"):
-			io.WriteString(w, "[]")
+			writeString(t, w, "[]")
 		default:
 			t.Fatalf("path=%s", r.URL.Path)
 		}
@@ -532,7 +546,7 @@ func TestTagsTrimmed(t *testing.T) {
 			t.Fatalf("tags=%v", tags)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		writeBytes(t, w, body)
 	}))
 	defer srv.Close()
 
@@ -559,7 +573,7 @@ func TestListBookmarksTagIgnoresFolder(t *testing.T) {
 			t.Fatalf("folder_id should be empty, got %s", form.Get("folder_id"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		writeBytes(t, w, body)
 	}))
 	defer srv.Close()
 

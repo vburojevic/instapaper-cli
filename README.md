@@ -247,3 +247,9 @@ Examples:
 
 - Instapaper's API Terms of Use prohibit storing user passwords. This CLI only stores OAuth tokens.
 - For Windows users, `--password-stdin` is strongly recommended.
+
+## API reference
+
+```
+https://www.instapaper.com/api
+```
