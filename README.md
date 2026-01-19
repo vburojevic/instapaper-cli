@@ -104,11 +104,21 @@ cat urls.txt | ./ip add -
 ./ip list --have "123:0.5:1700000000" --highlights "123,456"
 ./ip list --fields "bookmark_id,title,url" --ndjson
 ./ip list --cursor ~/.config/ip/cursor.json
+./ip list --cursor-dir ~/.config/ip/cursors
+./ip list --since bookmark_id:12345
+./ip list --until time:2025-01-01T00:00:00Z
+./ip list --updated-since 2025-01-01T00:00:00Z
+./ip list --limit 0 --max-pages 50
 ./ip list --plain --output bookmarks.txt
 ./ip list --folder "My Folder"  # resolves folder title
 ```
 
 By default, `list` returns all bookmarks (no limit) unless `defaults.list_limit` is set in config.
+
+Bounds format for `--since/--until`:
+- `bookmark_id:<id>` (default when no prefix is supplied)
+- `time:<rfc3339|unix>`
+- `progress_timestamp:<rfc3339|unix>`
 
 ## Mutations
 
@@ -121,6 +131,13 @@ By default, `list` returns all bookmarks (no limit) unless `defaults.list_limit`
 
 # Permanent delete (requires explicit flag)
 ./ip delete 123456 --yes-really-delete
+./ip delete 123456 --confirm 123456
+
+# Bulk mutations
+./ip archive --ids 1,2,3
+printf "10\n11\n12\n" | ./ip unarchive --stdin
+./ip delete --ids 5,6 --yes-really-delete
+./ip archive --ids 1,2,3 --batch 2
 ```
 
 Dry-run and idempotent modes:
@@ -135,6 +152,7 @@ Dry-run and idempotent modes:
 ```bash
 ./ip text 123456 --out article.html
 ./ip text 123456 --out article.html --open
+printf "1\n2\n3\n" | ./ip text --stdin --out ./articles
 ```
 
 ## Update read progress
@@ -167,6 +185,8 @@ Dry-run and idempotent modes:
 ```bash
 # Export all bookmarks (NDJSON by default)
 ./ip export --cursor ~/.config/ip/cursor.json
+./ip export --cursor-dir ~/.config/ip/cursors
+./ip export --since time:2025-01-01T00:00:00Z
 
 # Export with specific fields
 ./ip export --fields "bookmark_id,title,url" --ndjson
@@ -176,6 +196,9 @@ Dry-run and idempotent modes:
 
 # Import from NDJSON
 ./ip import --input bookmarks.ndjson --input-format ndjson
+
+# Import with progress events on stderr
+./ip import --input bookmarks.ndjson --input-format ndjson --progress-json
 ```
 
 Write output to a file:
@@ -208,6 +231,9 @@ This CLI is optimized for agent workflows. Default output is NDJSON; use structu
 - `--stderr-json` for structured errors and hints on stderr.
 - `--output` to write results to a file (use `-` for stdout).
 - Run `ip help ai` for agent-focused tips.
+- Use `--since/--until` or `--updated-since` for deterministic incremental pulls.
+- Use `--cursor-dir` for auto cursor files per folder/tag.
+- Use `--ids` or `--stdin` for bulk mutations; `--progress-json` for progress events.
 
 Examples:
 

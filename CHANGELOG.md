@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 - Add import/export commands and JSON schema output.
 - Add health/verify commands, config get/set/unset, and structured stderr errors.
 - Add CI (tests + lint), Makefile tasks, troubleshooting docs, and release checklist.
+- Add list/export bounds (`--since`, `--until`, `--updated-since`), cursor-dir, and max-pages.
+- Add bulk mutation flags (`--ids`, `--stdin`, `--batch`) and progress events for import.
 
 ## [0.1.0] - 2026-01-19
 - Initial public release.

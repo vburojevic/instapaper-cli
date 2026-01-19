@@ -171,3 +171,36 @@ func TestExitCodeForAPIError(t *testing.T) {
 		}
 	}
 }
+
+func TestParseBoundSpec(t *testing.T) {
+	bound, err := parseBoundSpec("123", "bookmark_id")
+	if err != nil {
+		t.Fatalf("parse bound: %v", err)
+	}
+	if bound.Field != "bookmark_id" || bound.Value != 123 {
+		t.Fatalf("unexpected bound: %+v", bound)
+	}
+
+	bound, err = parseBoundSpec("time:2025-01-01T00:00:00Z", "bookmark_id")
+	if err != nil {
+		t.Fatalf("parse time bound: %v", err)
+	}
+	if bound.Field != "time" || bound.Value == 0 {
+		t.Fatalf("unexpected time bound: %+v", bound)
+	}
+}
+
+func TestFilterBookmarksByBounds(t *testing.T) {
+	bookmarks := []instapaper.Bookmark{
+		{BookmarkID: 1, Time: 100, ProgressTimestamp: 0},
+		{BookmarkID: 2, Time: 200, ProgressTimestamp: 300},
+	}
+	since, err := parseUpdatedBound("150")
+	if err != nil {
+		t.Fatalf("parse updated bound: %v", err)
+	}
+	filtered := filterBookmarksByBounds(bookmarks, since, nil)
+	if len(filtered) != 1 || int64(filtered[0].BookmarkID) != 2 {
+		t.Fatalf("unexpected filtered result: %+v", filtered)
+	}
+}

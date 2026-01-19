@@ -282,8 +282,8 @@ Commands:
   config path|show|get|set|unset
   auth login|status|logout
   add <url|-> [--folder <id|"Title">] [--title ...] [--tags "a,b"]
-  list [--folder unread|starred|archive|<id>|"Title"] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>]
-  export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>]
+  list [--folder unread|starred|archive|<id>|"Title"] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>|--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N]
+  export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>|--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N]
   import [--input-format plain|csv|ndjson] [--input <file>|-]
   help ai|agent
   progress <bookmark_id> --progress <0..1> --timestamp <unix>
@@ -616,7 +616,9 @@ func runAuth(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 		if err := cfg.Save(cfgPath); err != nil {
 			return printError(stderr, err)
 		}
-		fmt.Fprintln(stdout, "Logged out")
+		if !opts.Quiet {
+			fmt.Fprintln(stdout, "Logged out")
+		}
 		return 0
 	case "login":
 		return runAuthLogin(ctx, args[1:], opts, cfg, cfgPath, stdout, stderr)
@@ -747,7 +749,9 @@ func runAuthLogin(ctx context.Context, args []string, opts *GlobalOptions, cfg *
 	if err := cfg.Save(cfgPath); err != nil {
 		return printError(stderr, err)
 	}
-	fmt.Fprintf(stdout, "Logged in as %s (user_id=%d)\n", cfg.User.Username, cfg.User.UserID)
+	if !opts.Quiet {
+		fmt.Fprintf(stdout, "Logged in as %s (user_id=%d)\n", cfg.User.Username, cfg.User.UserID)
+	}
 	return 0
 }
 
@@ -765,6 +769,7 @@ func runAdd(ctx context.Context, args []string, opts *GlobalOptions, cfg *config
 	var resolveFinalSet bool
 	var contentFile string
 	var privateSource string
+	var batch int
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.StringVar(&title, "title", "", "Title")
@@ -786,12 +791,16 @@ func runAdd(ctx context.Context, args []string, opts *GlobalOptions, cfg *config
 	})
 	fs.StringVar(&contentFile, "content-file", "", "Path to HTML content to send as 'content'")
 	fs.StringVar(&privateSource, "private-source", "", "Set is_private_from_source (requires content)")
+	fs.IntVar(&batch, "batch", 0, "Process items in batches of N (0 = all)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if help {
 		printFlagUsage(stdout, usageAdd(), fs)
 		return 0
+	}
+	if batch < 0 {
+		return printUsageError(stderr, "--batch must be >= 0")
 	}
 	remaining := fs.Args()
 	if len(remaining) != 1 {
@@ -899,6 +908,7 @@ func runAdd(ctx context.Context, args []string, opts *GlobalOptions, cfg *config
 	if urlArg == "-" {
 		scanner := bufio.NewScanner(os.Stdin)
 		exit := 0
+		count := 0
 		for scanner.Scan() {
 			u := strings.TrimSpace(scanner.Text())
 			if u == "" {
@@ -910,6 +920,10 @@ func runAdd(ctx context.Context, args []string, opts *GlobalOptions, cfg *config
 					exit = code
 				}
 				writeErrorLine(stderr, fmt.Errorf("adding %s: %v", u, err))
+			}
+			count++
+			if batch > 0 && count%batch == 0 && opts.RetryBackoff > 0 {
+				time.Sleep(opts.RetryBackoff)
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -935,6 +949,11 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	var highlights string
 	var fields string
 	var cursorPath string
+	var cursorDir string
+	var since string
+	var until string
+	var updatedSince string
+	var maxPages int
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.StringVar(&folder, "folder", "unread", "Folder: unread|starred|archive|<id>|\"Title\"")
@@ -944,6 +963,11 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	fs.StringVar(&highlights, "highlights", "", "Comma-separated bookmark IDs for highlights")
 	fs.StringVar(&fields, "fields", "", "Comma-separated fields (json/ndjson only)")
 	fs.StringVar(&cursorPath, "cursor", "", "Path to cursor file for incremental sync")
+	fs.StringVar(&cursorDir, "cursor-dir", "", "Directory for auto cursor files")
+	fs.StringVar(&since, "since", "", "Filter bookmarks since a bound (bookmark_id:<id> or time:<rfc3339|unix>)")
+	fs.StringVar(&until, "until", "", "Filter bookmarks up to a bound (bookmark_id:<id> or time:<rfc3339|unix>)")
+	fs.StringVar(&updatedSince, "updated-since", "", "Filter by updated time (progress_timestamp or time)")
+	fs.IntVar(&maxPages, "max-pages", 200, "Max pages when --limit is 0")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -955,8 +979,14 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	if limit < 0 || limit > 500 {
 		return printUsageError(stderr, fmt.Sprintf("invalid --limit %d (expected 0..500)", limit))
 	}
+	if maxPages < 0 {
+		return printUsageError(stderr, "--max-pages must be >= 0")
+	}
 	if fields != "" && !strings.EqualFold(opts.Format, "json") && !isNDJSONFormat(opts.Format) {
 		return printUsageError(stderr, "--fields requires --json or --ndjson output")
+	}
+	if since != "" && updatedSince != "" {
+		return printUsageError(stderr, "use only one of --since or --updated-since")
 	}
 
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
@@ -971,6 +1001,25 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 			return printError(stderr, err)
 		}
 	}
+	if cursorPath == "" && cursorDir != "" {
+		cursorPath = resolveCursorPath(cursorDir, folderID, tag)
+	}
+
+	sinceBound, err := parseBoundSpec(since, "bookmark_id")
+	if err != nil {
+		return printUsageError(stderr, err.Error())
+	}
+	if updatedSince != "" {
+		updatedBound, err := parseUpdatedBound(updatedSince)
+		if err != nil {
+			return printUsageError(stderr, err.Error())
+		}
+		sinceBound = updatedBound
+	}
+	untilBound, err := parseBoundSpec(until, "bookmark_id")
+	if err != nil {
+		return printUsageError(stderr, err.Error())
+	}
 
 	resp, err := listBookmarks(ctx, client, listBookmarksParams{
 		Limit:      limit,
@@ -980,10 +1029,12 @@ func runList(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 		Highlights: highlights,
 		Fields:     fields,
 		CursorPath: cursorPath,
+		MaxPages:   maxPages,
 	})
 	if err != nil {
 		return printError(stderr, err)
 	}
+	resp.Bookmarks = filterBookmarksByBounds(resp.Bookmarks, sinceBound, untilBound)
 	if fields != "" && (strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format)) {
 		if err := output.PrintBookmarksWithFields(stdout, opts.Format, resp.Bookmarks, fields); err != nil {
 			return printError(stderr, err)
@@ -1006,6 +1057,11 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	var have string
 	var fields string
 	var cursorPath string
+	var cursorDir string
+	var since string
+	var until string
+	var updatedSince string
+	var maxPages int
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.StringVar(&folder, "folder", "unread", "Folder: unread|starred|archive|<id>|\"Title\"")
@@ -1014,6 +1070,11 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	fs.StringVar(&have, "have", "", "Comma-separated IDs to exclude (id:progress:timestamp)")
 	fs.StringVar(&fields, "fields", "", "Comma-separated fields (json/ndjson only)")
 	fs.StringVar(&cursorPath, "cursor", "", "Path to cursor file for incremental sync")
+	fs.StringVar(&cursorDir, "cursor-dir", "", "Directory for auto cursor files")
+	fs.StringVar(&since, "since", "", "Filter bookmarks since a bound (bookmark_id:<id> or time:<rfc3339|unix>)")
+	fs.StringVar(&until, "until", "", "Filter bookmarks up to a bound (bookmark_id:<id> or time:<rfc3339|unix>)")
+	fs.StringVar(&updatedSince, "updated-since", "", "Filter by updated time (progress_timestamp or time)")
+	fs.IntVar(&maxPages, "max-pages", 200, "Max pages when --limit is 0")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1024,8 +1085,14 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	if limit < 0 || limit > 500 {
 		return printUsageError(stderr, fmt.Sprintf("invalid --limit %d (expected 0..500)", limit))
 	}
+	if maxPages < 0 {
+		return printUsageError(stderr, "--max-pages must be >= 0")
+	}
 	if fields != "" && !strings.EqualFold(opts.Format, "json") && !isNDJSONFormat(opts.Format) {
 		return printUsageError(stderr, "--fields requires --json or --ndjson output")
+	}
+	if since != "" && updatedSince != "" {
+		return printUsageError(stderr, "use only one of --since or --updated-since")
 	}
 
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
@@ -1040,6 +1107,25 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 			return printError(stderr, err)
 		}
 	}
+	if cursorPath == "" && cursorDir != "" {
+		cursorPath = resolveCursorPath(cursorDir, folderID, tag)
+	}
+
+	sinceBound, err := parseBoundSpec(since, "bookmark_id")
+	if err != nil {
+		return printUsageError(stderr, err.Error())
+	}
+	if updatedSince != "" {
+		updatedBound, err := parseUpdatedBound(updatedSince)
+		if err != nil {
+			return printUsageError(stderr, err.Error())
+		}
+		sinceBound = updatedBound
+	}
+	untilBound, err := parseBoundSpec(until, "bookmark_id")
+	if err != nil {
+		return printUsageError(stderr, err.Error())
+	}
 
 	resp, err := listBookmarks(ctx, client, listBookmarksParams{
 		Limit:      limit,
@@ -1048,10 +1134,12 @@ func runExport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 		Have:       have,
 		Fields:     fields,
 		CursorPath: cursorPath,
+		MaxPages:   maxPages,
 	})
 	if err != nil {
 		return printError(stderr, err)
 	}
+	resp.Bookmarks = filterBookmarksByBounds(resp.Bookmarks, sinceBound, untilBound)
 	if fields != "" && (strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format)) {
 		if err := output.PrintBookmarksWithFields(stdout, opts.Format, resp.Bookmarks, fields); err != nil {
 			return printError(stderr, err)
@@ -1082,6 +1170,7 @@ func runImport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	var folder string
 	var tags string
 	var archive bool
+	var progressJSON bool
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.StringVar(&inputPath, "input", "-", "Input file ('-' for stdin)")
@@ -1089,6 +1178,7 @@ func runImport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	fs.StringVar(&folder, "folder", "", "Default folder for imported items")
 	fs.StringVar(&tags, "tags", "", "Default tags for imported items (comma-separated)")
 	fs.BoolVar(&archive, "archive", false, "Archive imported items")
+	fs.BoolVar(&progressJSON, "progress-json", false, "Emit progress as NDJSON on stderr")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1115,6 +1205,8 @@ func runImport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	if err != nil {
 		return printError(stderr, err)
 	}
+	emitter := newProgressEmitter(progressJSON, stderr, "import", len(items))
+	emitter.Start()
 	folderCache := map[string]string{}
 	exit := 0
 	for _, it := range items {
@@ -1147,9 +1239,11 @@ func runImport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 		bm, err := client.AddBookmark(ctx, req)
 		if err != nil {
 			exit = exitCodeForError(err)
+			emitter.ItemError(map[string]any{"url": it.URL}, err)
 			writeErrorLine(stderr, fmt.Errorf("adding %s: %v", it.URL, err))
 			continue
 		}
+		emitter.ItemSuccess(map[string]any{"bookmark_id": int64(bm.BookmarkID), "url": it.URL})
 		if opts.Quiet {
 			fmt.Fprintf(stdout, "%d\n", int64(bm.BookmarkID))
 			continue
@@ -1164,6 +1258,7 @@ func runImport(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 		}
 		fmt.Fprintf(stdout, "Added %d: %s\n", int64(bm.BookmarkID), bm.Title)
 	}
+	emitter.Done()
 	return exit
 }
 
@@ -1258,6 +1353,7 @@ type listBookmarksParams struct {
 	Highlights string
 	Fields     string
 	CursorPath string
+	MaxPages   int
 }
 
 type cursorEntry struct {
@@ -1300,10 +1396,14 @@ func listBookmarks(ctx context.Context, client *instapaper.Client, params listBo
 	}
 	resp := instapaper.BookmarksListResponse{}
 	pages := 0
+	maxPages := params.MaxPages
+	if maxPages <= 0 {
+		maxPages = 200
+	}
 	for {
 		pages++
-		if pages > 200 {
-			return resp, fmt.Errorf("list exceeded max pages; use --limit to cap results")
+		if params.Limit == 0 && pages > maxPages {
+			return resp, fmt.Errorf("list exceeded max pages; use --max-pages or --limit to cap results")
 		}
 		r, err := client.ListBookmarks(ctx, instapaper.ListBookmarksOptions{
 			Limit:      limit,
@@ -1391,56 +1491,91 @@ func runProgress(ctx context.Context, args []string, opts *GlobalOptions, cfg *c
 }
 
 func runBookmarkMutation(ctx context.Context, cmd string, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
-	if hasHelpFlag(args) {
-		fmt.Fprintln(stdout, usageBookmarkMutation(cmd))
-		return 0
-	}
-	if len(args) != 1 {
-		fmt.Fprintf(stderr, "usage: ip %s <bookmark_id>\n", cmd)
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var help bool
+	var idsCSV string
+	var stdin bool
+	var batch int
+	var progressJSON bool
+	fs.BoolVar(&help, "help", false, "Show help")
+	fs.BoolVar(&help, "h", false, "Show help")
+	fs.StringVar(&idsCSV, "ids", "", "Comma-separated bookmark IDs")
+	fs.BoolVar(&stdin, "stdin", false, "Read bookmark IDs from stdin")
+	fs.IntVar(&batch, "batch", 0, "Process items in batches of N (0 = all)")
+	fs.BoolVar(&progressJSON, "progress-json", false, "Emit progress as NDJSON on stderr")
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	id, err := parseInt64(args[0])
+	if help {
+		printFlagUsage(stdout, usageBookmarkMutation(cmd), fs)
+		return 0
+	}
+	ids, err := collectIDs(fs.Args(), idsCSV, stdin)
 	if err != nil {
-		return printError(stderr, err)
+		return printUsageError(stderr, err.Error())
+	}
+	if len(ids) == 0 {
+		return printUsageError(stderr, fmt.Sprintf("usage: ip %s <bookmark_id> [--ids ...] [--stdin]", cmd))
+	}
+	if batch < 0 {
+		return printUsageError(stderr, "--batch must be >= 0")
 	}
 	if opts.DryRun {
-		_ = emitDryRunAction(stdout, opts.Format, cmd, map[string]any{"bookmark_id": id})
-		return 0
+		return emitDryRunIDs(stdout, opts.Format, cmd, ids)
 	}
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
 	if err != nil {
 		return printError(stderr, err)
 	}
-	var bm instapaper.Bookmark
-	switch cmd {
-	case "archive":
-		bm, err = client.Archive(ctx, id)
-	case "unarchive":
-		bm, err = client.Unarchive(ctx, id)
-	case "star":
-		bm, err = client.Star(ctx, id)
-	case "unstar":
-		bm, err = client.Unstar(ctx, id)
-	default:
-		err = fmt.Errorf("unknown mutation: %s", cmd)
-	}
-	if err != nil {
-		if opts.Idempotent && isAlreadyStateError(err) {
-			if opts.Quiet {
-				fmt.Fprintf(stdout, "%d\n", id)
-				return 0
-			}
-			fmt.Fprintf(stdout, "OK %s %d\n", cmd, id)
-			return 0
+
+	emitter := newProgressEmitter(progressJSON, stderr, cmd, len(ids))
+	emitter.Start()
+	exit := 0
+	for i, id := range ids {
+		var bm instapaper.Bookmark
+		switch cmd {
+		case "archive":
+			bm, err = client.Archive(ctx, id)
+		case "unarchive":
+			bm, err = client.Unarchive(ctx, id)
+		case "star":
+			bm, err = client.Star(ctx, id)
+		case "unstar":
+			bm, err = client.Unstar(ctx, id)
+		default:
+			err = fmt.Errorf("unknown mutation: %s", cmd)
 		}
-		return printError(stderr, err)
+		if err != nil {
+			if opts.Idempotent && isAlreadyStateError(err) {
+				emitter.ItemSuccess(map[string]any{"bookmark_id": id, "idempotent": true})
+				if opts.Quiet {
+					fmt.Fprintf(stdout, "%d\n", id)
+				} else {
+					fmt.Fprintf(stdout, "OK %s %d\n", cmd, id)
+				}
+				continue
+			}
+			code := exitCodeForError(err)
+			if code > exit {
+				exit = code
+			}
+			emitter.ItemError(map[string]any{"bookmark_id": id}, err)
+			writeErrorLine(stderr, fmt.Errorf("%s %d: %v", cmd, id, err))
+			continue
+		}
+		emitter.ItemSuccess(map[string]any{"bookmark_id": int64(bm.BookmarkID)})
+		if opts.Quiet {
+			fmt.Fprintf(stdout, "%d\n", int64(bm.BookmarkID))
+		} else {
+			fmt.Fprintf(stdout, "OK %s %d\n", cmd, int64(bm.BookmarkID))
+		}
+		if batch > 0 && (i+1)%batch == 0 && i+1 < len(ids) && opts.RetryBackoff > 0 {
+			time.Sleep(opts.RetryBackoff)
+		}
 	}
-	if opts.Quiet {
-		fmt.Fprintf(stdout, "%d\n", int64(bm.BookmarkID))
-		return 0
-	}
-	fmt.Fprintf(stdout, "OK %s %d\n", cmd, int64(bm.BookmarkID))
-	return 0
+	emitter.Done()
+	return exit
 }
 
 func runMove(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
@@ -1502,10 +1637,18 @@ func runDelete(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 	var help bool
 	var yes bool
 	var confirm string
+	var idsCSV string
+	var stdin bool
+	var batch int
+	var progressJSON bool
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.BoolVar(&yes, "yes-really-delete", false, "Confirm permanent deletion")
 	fs.StringVar(&confirm, "confirm", "", "Confirm delete by repeating the bookmark id")
+	fs.StringVar(&idsCSV, "ids", "", "Comma-separated bookmark IDs")
+	fs.BoolVar(&stdin, "stdin", false, "Read bookmark IDs from stdin")
+	fs.IntVar(&batch, "batch", 0, "Process items in batches of N (0 = all)")
+	fs.BoolVar(&progressJSON, "progress-json", false, "Emit progress as NDJSON on stderr")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1513,35 +1656,55 @@ func runDelete(ctx context.Context, args []string, opts *GlobalOptions, cfg *con
 		printFlagUsage(stdout, usageDelete(), fs)
 		return 0
 	}
-	remaining := fs.Args()
-	if len(remaining) != 1 {
+	ids, err := collectIDs(fs.Args(), idsCSV, stdin)
+	if err != nil {
+		return printUsageError(stderr, err.Error())
+	}
+	if len(ids) == 0 {
 		return printUsageError(stderr, "usage: ip delete <bookmark_id> --yes-really-delete|--confirm <bookmark_id>")
+	}
+	if batch < 0 {
+		return printUsageError(stderr, "--batch must be >= 0")
+	}
+	if len(ids) > 1 && confirm != "" {
+		return printUsageError(stderr, "--confirm is only supported for a single bookmark id")
 	}
 	if !opts.DryRun && !yes && confirm == "" {
 		return printUsageError(stderr, "refusing: permanent delete requires --yes-really-delete or --confirm <bookmark_id>")
 	}
-	id, err := parseInt64(remaining[0])
-	if err != nil {
-		return printError(stderr, err)
-	}
-	if confirm != "" && confirm != remaining[0] {
+	if confirm != "" && fmt.Sprintf("%d", ids[0]) != confirm {
 		return printError(stderr, fmt.Errorf("--confirm must match bookmark id"))
 	}
 	if opts.DryRun {
-		_ = emitDryRunAction(stdout, opts.Format, "delete", map[string]any{"bookmark_id": id})
-		return 0
+		return emitDryRunIDs(stdout, opts.Format, "delete", ids)
 	}
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
 	if err != nil {
 		return printError(stderr, err)
 	}
-	if err := client.DeleteBookmark(ctx, id); err != nil {
-		return printError(stderr, err)
+	emitter := newProgressEmitter(progressJSON, stderr, "delete", len(ids))
+	emitter.Start()
+	exit := 0
+	for i, id := range ids {
+		if err := client.DeleteBookmark(ctx, id); err != nil {
+			code := exitCodeForError(err)
+			if code > exit {
+				exit = code
+			}
+			emitter.ItemError(map[string]any{"bookmark_id": id}, err)
+			writeErrorLine(stderr, fmt.Errorf("delete %d: %v", id, err))
+		} else {
+			emitter.ItemSuccess(map[string]any{"bookmark_id": id})
+			if !opts.Quiet {
+				fmt.Fprintf(stdout, "Deleted %d\n", id)
+			}
+		}
+		if batch > 0 && (i+1)%batch == 0 && i+1 < len(ids) && opts.RetryBackoff > 0 {
+			time.Sleep(opts.RetryBackoff)
+		}
 	}
-	if !opts.Quiet {
-		fmt.Fprintf(stdout, "Deleted %d\n", id)
-	}
-	return 0
+	emitter.Done()
+	return exit
 }
 
 func runText(ctx context.Context, args []string, opts *GlobalOptions, cfg *config.Config, stdout, stderr io.Writer) int {
@@ -1550,10 +1713,12 @@ func runText(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 	var help bool
 	var outPath string
 	var openIt bool
+	var stdin bool
 	fs.BoolVar(&help, "help", false, "Show help")
 	fs.BoolVar(&help, "h", false, "Show help")
 	fs.StringVar(&outPath, "out", "", "Write HTML to file")
 	fs.BoolVar(&openIt, "open", false, "Open the output file in default browser")
+	fs.BoolVar(&stdin, "stdin", false, "Read bookmark IDs from stdin")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1562,17 +1727,59 @@ func runText(ctx context.Context, args []string, opts *GlobalOptions, cfg *confi
 		return 0
 	}
 	remaining := fs.Args()
-	if len(remaining) != 1 {
-		return printUsageError(stderr, "usage: ip text <bookmark_id> [--out file] [--open]")
+	if stdin && openIt {
+		return printUsageError(stderr, "--open is not supported with --stdin")
 	}
-	id, err := parseInt64(remaining[0])
-	if err != nil {
-		return printError(stderr, err)
+	var ids []int64
+	var err error
+	if stdin {
+		ids, err = collectIDs(nil, "", true)
+		if err != nil {
+			return printUsageError(stderr, err.Error())
+		}
+		if len(ids) == 0 {
+			return printUsageError(stderr, "no bookmark ids provided on stdin")
+		}
+	} else {
+		if len(remaining) != 1 {
+			return printUsageError(stderr, "usage: ip text <bookmark_id> [--out file] [--open]")
+		}
+		id, err := parseInt64(remaining[0])
+		if err != nil {
+			return printError(stderr, err)
+		}
+		ids = []int64{id}
 	}
 	client, _, _, err := requireClient(opts, cfg, true, stderr)
 	if err != nil {
 		return printError(stderr, err)
 	}
+	if len(ids) > 1 && outPath == "" {
+		return printUsageError(stderr, "text --stdin requires --out <directory> when multiple ids are provided")
+	}
+	if len(ids) > 1 {
+		if err := os.MkdirAll(outPath, 0o700); err != nil {
+			return printError(stderr, err)
+		}
+		for _, id := range ids {
+			b, err := client.GetTextHTML(ctx, id)
+			if err != nil {
+				writeErrorLine(stderr, err)
+				continue
+			}
+			path := filepath.Join(outPath, fmt.Sprintf("instapaper-%d.html", id))
+			if err := os.WriteFile(path, b, 0o600); err != nil {
+				writeErrorLine(stderr, err)
+				continue
+			}
+			if !opts.Quiet {
+				fmt.Fprintln(stdout, path)
+			}
+		}
+		return 0
+	}
+
+	id := ids[0]
 	b, err := client.GetTextHTML(ctx, id)
 	if err != nil {
 		return printError(stderr, err)
@@ -2153,6 +2360,362 @@ func mergeHaveString(cur *listCursor, have string) {
 	}
 }
 
+type boundSpec struct {
+	Field string
+	Value int64
+}
+
+func parseBoundSpec(spec string, defaultField string) (*boundSpec, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	field := strings.ToLower(strings.TrimSpace(defaultField))
+	valuePart := spec
+	if idx := strings.Index(spec, ":"); idx > -1 {
+		field = strings.ToLower(strings.TrimSpace(spec[:idx]))
+		valuePart = strings.TrimSpace(spec[idx+1:])
+		if field == "" {
+			field = strings.ToLower(strings.TrimSpace(defaultField))
+		}
+	}
+	if valuePart == "" {
+		return nil, fmt.Errorf("invalid bound %q", spec)
+	}
+	field = normalizeBoundField(field)
+	switch field {
+	case "bookmark_id":
+		v, err := parseInt64(valuePart)
+		if err != nil {
+			return nil, err
+		}
+		return &boundSpec{Field: field, Value: v}, nil
+	case "time", "progress_timestamp", "updated":
+		v, err := parseTimeValue(valuePart)
+		if err != nil {
+			return nil, err
+		}
+		return &boundSpec{Field: field, Value: v}, nil
+	default:
+		return nil, fmt.Errorf("unknown bound field: %s", field)
+	}
+}
+
+func parseUpdatedBound(spec string) (*boundSpec, error) {
+	if strings.TrimSpace(spec) == "" {
+		return nil, nil
+	}
+	v, err := parseTimeValue(spec)
+	if err != nil {
+		return nil, err
+	}
+	return &boundSpec{Field: "updated", Value: v}, nil
+}
+
+func normalizeBoundField(field string) string {
+	switch field {
+	case "id", "bookmark", "bookmarkid", "bookmark_id":
+		return "bookmark_id"
+	case "time", "created", "created_at":
+		return "time"
+	case "progress", "progress_ts", "progress_timestamp":
+		return "progress_timestamp"
+	case "updated", "updated_at":
+		return "updated"
+	default:
+		return field
+	}
+}
+
+func parseTimeValue(value string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, fmt.Errorf("invalid time value")
+	}
+	if v, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return v, nil
+	}
+	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return t.Unix(), nil
+	}
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t.Unix(), nil
+	}
+	if t, err := time.Parse("2006-01-02", value); err == nil {
+		return t.Unix(), nil
+	}
+	return 0, fmt.Errorf("invalid time value: %s", value)
+}
+
+func filterBookmarksByBounds(bookmarks []instapaper.Bookmark, since, until *boundSpec) []instapaper.Bookmark {
+	if since == nil && until == nil {
+		return bookmarks
+	}
+	out := make([]instapaper.Bookmark, 0, len(bookmarks))
+	for _, b := range bookmarks {
+		if !bookmarkWithinBounds(b, since, until) {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+func bookmarkWithinBounds(b instapaper.Bookmark, since, until *boundSpec) bool {
+	if since != nil {
+		if bookmarkFieldValue(b, since.Field) < since.Value {
+			return false
+		}
+	}
+	if until != nil {
+		if bookmarkFieldValue(b, until.Field) > until.Value {
+			return false
+		}
+	}
+	return true
+}
+
+func bookmarkFieldValue(b instapaper.Bookmark, field string) int64 {
+	switch field {
+	case "bookmark_id":
+		return int64(b.BookmarkID)
+	case "progress_timestamp":
+		return int64(b.ProgressTimestamp)
+	case "updated":
+		return updatedValue(b)
+	default:
+		return int64(b.Time)
+	}
+}
+
+func updatedValue(b instapaper.Bookmark) int64 {
+	if b.ProgressTimestamp > 0 {
+		return int64(b.ProgressTimestamp)
+	}
+	return int64(b.Time)
+}
+
+func resolveCursorPath(dir, folderID, tag string) string {
+	if dir == "" {
+		return ""
+	}
+	name := "unread"
+	if tag != "" {
+		name = "tag-" + tag
+	} else if folderID != "" {
+		name = "folder-" + folderID
+	}
+	name = sanitizeFilename(name)
+	return filepath.Join(dir, name+".json")
+}
+
+func sanitizeFilename(name string) string {
+	if name == "" {
+		return "cursor"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "cursor"
+	}
+	return out
+}
+
+type progressEmitter struct {
+	enabled bool
+	writer  io.Writer
+	action  string
+	total   int
+	current int
+	success int
+	failed  int
+}
+
+func newProgressEmitter(enabled bool, w io.Writer, action string, total int) *progressEmitter {
+	return &progressEmitter{
+		enabled: enabled,
+		writer:  w,
+		action:  action,
+		total:   total,
+	}
+}
+
+func (p *progressEmitter) Start() {
+	if !p.enabled {
+		return
+	}
+	payload := map[string]any{
+		"event":  "start",
+		"action": p.action,
+	}
+	if p.total > 0 {
+		payload["total"] = p.total
+	}
+	_ = output.WriteJSONLine(p.writer, payload)
+}
+
+func (p *progressEmitter) ItemSuccess(meta map[string]any) {
+	if !p.enabled {
+		return
+	}
+	p.current++
+	p.success++
+	payload := map[string]any{
+		"event":   "item",
+		"action":  p.action,
+		"status":  "ok",
+		"current": p.current,
+		"success": p.success,
+		"failed":  p.failed,
+		"data":    meta,
+	}
+	if p.total > 0 {
+		payload["total"] = p.total
+	}
+	_ = output.WriteJSONLine(p.writer, payload)
+}
+
+func (p *progressEmitter) ItemError(meta map[string]any, err error) {
+	if !p.enabled {
+		return
+	}
+	p.current++
+	p.failed++
+	payload := map[string]any{
+		"event":   "item",
+		"action":  p.action,
+		"status":  "error",
+		"error":   err.Error(),
+		"current": p.current,
+		"success": p.success,
+		"failed":  p.failed,
+		"data":    meta,
+	}
+	if p.total > 0 {
+		payload["total"] = p.total
+	}
+	_ = output.WriteJSONLine(p.writer, payload)
+}
+
+func (p *progressEmitter) Done() {
+	if !p.enabled {
+		return
+	}
+	payload := map[string]any{
+		"event":   "done",
+		"action":  p.action,
+		"success": p.success,
+		"failed":  p.failed,
+	}
+	if p.total > 0 {
+		payload["total"] = p.total
+	}
+	_ = output.WriteJSONLine(p.writer, payload)
+}
+
+func collectIDs(args []string, idsCSV string, stdin bool) ([]int64, error) {
+	if idsCSV != "" && stdin {
+		return nil, fmt.Errorf("use only one of --ids or --stdin")
+	}
+	if idsCSV != "" {
+		return parseIDList(idsCSV)
+	}
+	if stdin {
+		return readIDsFromReader(os.Stdin)
+	}
+	if len(args) == 0 {
+		return nil, nil
+	}
+	return parseIDList(strings.Join(args, ","))
+}
+
+func parseIDList(value string) ([]int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\t' || r == ' '
+	})
+	ids := make([]int64, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := parseInt64(part)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func readIDsFromReader(r io.Reader) ([]int64, error) {
+	scanner := bufio.NewScanner(r)
+	var ids []int64
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		id, err := parseInt64(line)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func emitDryRunIDs(w io.Writer, format, action string, ids []int64) int {
+	if strings.EqualFold(format, "json") {
+		payload := map[string]any{
+			"dry_run": true,
+			"action":  action,
+			"ids":     ids,
+		}
+		if err := output.WriteJSON(w, payload); err != nil {
+			return 1
+		}
+		return 0
+	}
+	if isNDJSONFormat(format) {
+		for _, id := range ids {
+			if err := output.WriteJSONLine(w, map[string]any{
+				"dry_run": true,
+				"action":  action,
+				"data": map[string]any{
+					"bookmark_id": id,
+				},
+			}); err != nil {
+				return 1
+			}
+		}
+		return 0
+	}
+	for _, id := range ids {
+		fmt.Fprintf(w, "DRY RUN: %s %d\n", action, id)
+	}
+	return 0
+}
+
 func printConfig(w io.Writer, cfg *config.Config) error {
 	tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
 	fmt.Fprintln(tw, "KEY\tVALUE")
@@ -2680,19 +3243,19 @@ func usageAdd() string {
 }
 
 func usageList() string {
-	return "Usage:\n  ip list [--folder ...] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>]\n"
+	return "Usage:\n  ip list [--folder ...] [--limit N] [--tag name] [--have ...] [--highlights ...] [--fields ...] [--cursor <file>] [--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N]\n"
 }
 
 func usageExport() string {
-	return "Usage:\n  ip export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>]\n"
+	return "Usage:\n  ip export [--folder ...] [--tag ...] [--limit N] [--fields ...] [--cursor <file>] [--cursor-dir <dir>] [--since <bound>] [--until <bound>] [--updated-since <time>] [--max-pages N]\n"
 }
 
 func usageImport() string {
-	return "Usage:\n  ip import [--input <file>|-] [--input-format plain|csv|ndjson] [--folder ...] [--tags ...] [--archive]\n"
+	return "Usage:\n  ip import [--input <file>|-] [--input-format plain|csv|ndjson] [--folder ...] [--tags ...] [--archive] [--progress-json]\n"
 }
 
 func usageBookmarkMutation(cmd string) string {
-	return fmt.Sprintf("Usage:\n  ip %s <bookmark_id>\n", cmd)
+	return fmt.Sprintf("Usage:\n  ip %s <bookmark_id> [<bookmark_id> ...] [--ids <ids>] [--stdin]\n", cmd)
 }
 
 func usageMove() string {
@@ -2700,7 +3263,7 @@ func usageMove() string {
 }
 
 func usageDelete() string {
-	return "Usage:\n  ip delete <bookmark_id> --yes-really-delete|--confirm <bookmark_id>\n"
+	return "Usage:\n  ip delete <bookmark_id> [--ids <ids>] [--stdin] --yes-really-delete|--confirm <bookmark_id>\n"
 }
 
 func usageProgress() string {
@@ -2708,7 +3271,7 @@ func usageProgress() string {
 }
 
 func usageText() string {
-	return "Usage:\n  ip text <bookmark_id> [--out <file>] [--open]\n"
+	return "Usage:\n  ip text <bookmark_id> [--out <file>] [--open]\n  ip text --stdin --out <dir>\n"
 }
 
 func usageFolders() string {
@@ -2766,9 +3329,13 @@ func usageAgent() string {
   - Prefer --plain only for line-oriented, human-friendly output.
   - Use --stderr-json for structured errors and exit codes.
   - For deterministic output, avoid table mode.
+  - Use --since/--until or --updated-since to slice lists without cursors.
+  - Use --cursor-dir for automatic incremental sync files.
+  - Use --ids or --stdin for bulk mutations; add --progress-json for progress events.
 Examples:
   ip --json auth status
-  ip list --ndjson --limit 0
+  ip list --ndjson --limit 0 --max-pages 50
+  ip list --updated-since 2025-01-01T00:00:00Z
   ip list --plain --output bookmarks.txt
 `
 }
