@@ -36,6 +36,7 @@ brews:
     homepage: https://github.com/vburojevic/instapaper-cli
     description: Dependency-free Instapaper CLI
     license: MIT
+    skip_upload: "{{ if .Env.HOMEBREW_TAP_GITHUB_TOKEN }}false{{ else }}true{{ end }}"
     commit_author:
       name: github-actions[bot]
       email: 41898282+github-actions[bot]@users.noreply.github.com

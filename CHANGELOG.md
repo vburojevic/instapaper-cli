@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-01-19
+- Skip Homebrew upload when tap token is missing.
+
 ## [0.2.2] - 2026-01-19
 - Fix GoReleaser Homebrew config for v2.
 
