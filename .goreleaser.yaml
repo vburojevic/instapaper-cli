@@ -32,14 +32,14 @@ checksum:
 
 brews:
   - name: instapaper-cli
-    folder: Formula
+    directory: Formula
     homepage: https://github.com/vburojevic/instapaper-cli
     description: Dependency-free Instapaper CLI
     license: MIT
     commit_author:
       name: github-actions[bot]
       email: 41898282+github-actions[bot]@users.noreply.github.com
-    tap:
+    repository:
       owner: vburojevic
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
