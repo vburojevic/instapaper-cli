@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,6 +33,17 @@ func writeConfig(t *testing.T, path string, cfg *config.Config) {
 	if err := cfg.Save(path); err != nil {
 		t.Fatalf("Save config: %v", err)
 	}
+}
+
+func writeAuthConfig(t *testing.T, path string) *config.Config {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.ConsumerKey = "ck"
+	cfg.ConsumerSecret = "cs"
+	cfg.OAuthToken = "tok"
+	cfg.OAuthTokenSecret = "toksecret"
+	writeConfig(t, path, cfg)
+	return cfg
 }
 
 func TestHelpAndVersion(t *testing.T) {
@@ -141,6 +155,48 @@ func TestAuthStatusJSON(t *testing.T) {
 	}
 }
 
+func TestListNDJSONWithMockServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/1/bookmarks/list" {
+			http.NotFound(w, r)
+			return
+		}
+		payload := []map[string]any{
+			{"type": "user", "user_id": 1, "username": "tester"},
+			{"type": "bookmark", "bookmark_id": 101, "url": "https://a.example", "title": "A", "time": 1700000000},
+			{"type": "bookmark", "bookmark_id": 102, "url": "https://b.example", "title": "B", "time": 1700000001, "starred": 1},
+		}
+		b, _ := json.Marshal(payload)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+	}))
+	defer server.Close()
+
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.json")
+	writeAuthConfig(t, cfgPath)
+
+	code, out, errOut := runCmd(t,
+		"ip",
+		"--config", cfgPath,
+		"--api-base", server.URL,
+		"--ndjson",
+		"list",
+		"--limit", "2",
+	)
+	if code != 0 {
+		t.Fatalf("list exit=%d err=%s", code, errOut)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 ndjson lines, got %d: %q", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "\"bookmark_id\":101") || !strings.Contains(lines[1], "\"bookmark_id\":102") {
+		t.Fatalf("unexpected ndjson output: %q", out)
+	}
+}
+
 func TestStderrJSON(t *testing.T) {
 	args := append([]string{"ip"}, tempConfigArg(t)...)
 	code, _, errOut := runCmd(t, append(args, "--stderr-json", "--format", "table", "list", "--limit", "-1")...)
@@ -149,6 +205,9 @@ func TestStderrJSON(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "\"error\"") {
 		t.Fatalf("expected json error on stderr, got: %s", errOut)
+	}
+	if !strings.Contains(errOut, "\"code\"") {
+		t.Fatalf("expected error code in stderr json, got: %s", errOut)
 	}
 }
 
@@ -168,6 +227,26 @@ func TestExitCodeForAPIError(t *testing.T) {
 		got := exitCodeForError(&instapaper.APIError{Code: tc.code})
 		if got != tc.want {
 			t.Fatalf("code %d: got %d want %d", tc.code, got, tc.want)
+		}
+	}
+}
+
+func TestErrorCodeForAPIError(t *testing.T) {
+	cases := []struct {
+		code int
+		want string
+	}{
+		{code: 1040, want: ErrCodeRateLimited},
+		{code: 1041, want: ErrCodePremiumRequired},
+		{code: 1042, want: ErrCodeAppSuspended},
+		{code: 1240, want: ErrCodeInvalidRequest},
+		{code: 1500, want: ErrCodeServerError},
+		{code: 9999, want: ErrCodeAPIError},
+	}
+	for _, tc := range cases {
+		got := errorCodeForError(&instapaper.APIError{Code: tc.code})
+		if got != tc.want {
+			t.Fatalf("code %d: got %s want %s", tc.code, got, tc.want)
 		}
 	}
 }

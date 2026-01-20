@@ -269,9 +269,10 @@ This CLI is optimized for agent workflows. Default output is NDJSON; use structu
 - `--json` for single objects (auth status, config, or single operations).
 - `--ndjson` (or `--jsonl`) for streaming lists; each line is a full JSON object.
 - `--plain` for stable, line-oriented text output.
-- `--stderr-json` for structured errors and hints on stderr.
+- `--stderr-json` for structured errors, error codes, and hints on stderr.
 - `--output` to write results to a file (use `-` for stdout).
 - Run `ip help ai` for agent-focused tips.
+- Run `ip doctor` to preflight config/auth/network before long workflows.
 - Use `--since/--until` or `--updated-since` for deterministic incremental pulls.
 - Use `--cursor-dir` for auto cursor files per folder/tag.
 - Use `--ids` or `--stdin` for bulk mutations; `--progress-json` for progress events.
@@ -284,6 +285,8 @@ Examples:
 ./ip --json config show
 ./ip list --ndjson --limit 0
 ./ip list --plain --output bookmarks.txt
+./ip --stderr-json list --limit 1
+./ip doctor --json
 ```
 
 ## Help
@@ -307,6 +310,7 @@ Examples:
 - Rate limits: error code `1040` means retry later; consider backing off.
 - Config issues: `./ip config path` to locate your config; `./ip --json config show` to inspect values.
 - Network problems: try `./ip --debug list --limit 1` to see request timing and status codes.
+- Preflight: run `./ip doctor` to see config/auth/network readiness in one shot.
 
 ## Exit codes
 
@@ -319,10 +323,45 @@ Examples:
 - `13` invalid request
 - `14` server error
 
+## Structured error codes (stderr JSON)
+
+When you pass `--stderr-json`, errors include a stable `code` string and `exit_code`.
+
+- `rate_limited`, `premium_required`, `app_suspended`
+- `invalid_request`, `server_error`, `api_error`
+- `auth_error`, `config_error`
+- `timeout`, `network_error`
+- `invalid_usage`, `unknown`
+
 ## Notes
 
 - Instapaper's API Terms of Use prohibit storing user passwords. This CLI only stores OAuth tokens.
 - For Windows users, `--password-stdin` is strongly recommended.
+
+## API coverage
+
+| Instapaper endpoint | CLI command(s) | Notes |
+| --- | --- | --- |
+| `/api/1/oauth/access_token` | `ip auth login` | XAuth; use `--password-stdin` for secrets. |
+| `/api/1/account/verify_credentials` | `ip auth status`, `ip health`, `ip verify`, `ip doctor` | Credential and network checks. |
+| `/api/1/bookmarks/list` | `ip list`, `ip export` | Supports paging/cursors/bounds. |
+| `/api/1/bookmarks/add` | `ip add`, `ip import` | `--tags`, `--folder`, `--content`. |
+| `/api/1/bookmarks/update_read_progress` | `ip progress` | Progress + timestamp. |
+| `/api/1/bookmarks/delete` | `ip delete` | Requires explicit confirmation. |
+| `/api/1/bookmarks/archive` | `ip archive` |  |
+| `/api/1/bookmarks/unarchive` | `ip unarchive` |  |
+| `/api/1/bookmarks/star` | `ip star` |  |
+| `/api/1/bookmarks/unstar` | `ip unstar` |  |
+| `/api/1/bookmarks/move` | `ip move` | Folder ID or title. |
+| `/api/1/bookmarks/get_text` | `ip text` | Writes text to stdout or `--out`. |
+| `/api/1/folders/list` | `ip folders list` |  |
+| `/api/1/folders/add` | `ip folders add` |  |
+| `/api/1/folders/delete` | `ip folders delete` | Requires confirmation. |
+| `/api/1/folders/set_order` | `ip folders order` | Comma-separated `id:position`. |
+| `/api/1.1/bookmarks/{id}/highlights` | `ip highlights list` |  |
+| `/api/1.1/bookmarks/{id}/highlight` | `ip highlights add` |  |
+| `/api/1.1/highlights/{id}/delete` | `ip highlights delete` |  |
+| (no tag management API) | `ip tags` | Instapaper API does not support tag CRUD. |
 
 ## API reference
 

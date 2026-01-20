@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-01-20
+- Add `ip doctor` preflight for config/auth/network readiness.
+- Emit structured error codes with `--stderr-json`.
+- Add mock-server NDJSON integration test for list command.
+- Document API coverage and release automation scripts.
+
 ## [0.2.6] - 2026-01-19
 - Accept float timestamps in integer fields.
 - Extend tests for float parsing and flag ordering.

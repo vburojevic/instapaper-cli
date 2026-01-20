@@ -230,6 +230,8 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		return runHighlights(ctx, cmdArgs, &opts, cfg, stdout, stderr)
 	case "health":
 		return runHealth(ctx, &opts, cfg, stdout, stderr)
+	case "doctor":
+		return runDoctor(ctx, &opts, cfgPath, cfg, stdout, stderr)
 	case "verify":
 		return runVerify(ctx, &opts, cfg, stdout, stderr)
 	case "schema":
@@ -300,6 +302,7 @@ Commands:
   folders list|add|delete|order
   highlights list|add|delete
   health
+  doctor
   verify
   schema [bookmarks|folders|highlights|auth|config]
   tags list|rename|delete
@@ -352,6 +355,8 @@ func runHelp(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, usageAgent())
 	case "health":
 		fmt.Fprintln(stdout, usageHealth())
+	case "doctor":
+		fmt.Fprintln(stdout, usageDoctor())
 	case "verify":
 		fmt.Fprintln(stdout, usageVerify())
 	case "schema":
@@ -1414,6 +1419,132 @@ func runVerify(ctx context.Context, opts *GlobalOptions, cfg *config.Config, std
 	return 0
 }
 
+type doctorCheck struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+	Hint   string `json:"hint,omitempty"`
+}
+
+func runDoctor(ctx context.Context, opts *GlobalOptions, cfgPath string, cfg *config.Config, stdout, stderr io.Writer) int {
+	configExists := false
+	if cfgPath != "" {
+		if _, err := os.Stat(cfgPath); err == nil {
+			configExists = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return printError(stderr, err)
+		}
+	}
+
+	ck := os.Getenv("INSTAPAPER_CONSUMER_KEY")
+	ckSource := "env"
+	if ck == "" {
+		ck = cfg.ConsumerKey
+		if ck != "" {
+			ckSource = "config"
+		} else {
+			ckSource = "missing"
+		}
+	}
+	cs := os.Getenv("INSTAPAPER_CONSUMER_SECRET")
+	csSource := "env"
+	if cs == "" {
+		cs = cfg.ConsumerSecret
+		if cs != "" {
+			csSource = "config"
+		} else {
+			csSource = "missing"
+		}
+	}
+	ckOK := ckSource != "missing"
+	csOK := csSource != "missing"
+	authOK := cfg.HasAuth()
+
+	checks := []doctorCheck{
+		{
+			Name:   "config_file",
+			OK:     true,
+			Detail: fmt.Sprintf("%s (exists=%t)", cfgPath, configExists),
+		},
+		{
+			Name:   "consumer_key",
+			OK:     ckOK,
+			Detail: ckSource,
+		},
+		{
+			Name:   "consumer_secret",
+			OK:     csOK,
+			Detail: csSource,
+		},
+		{
+			Name:   "auth",
+			OK:     authOK,
+			Detail: "config",
+		},
+	}
+	if !ckOK {
+		checks[1].Hint = "set INSTAPAPER_CONSUMER_KEY or ip config set consumer_key <value>"
+	}
+	if !csOK {
+		checks[2].Hint = "set INSTAPAPER_CONSUMER_SECRET or ip config set consumer_secret <value>"
+	}
+	if !authOK {
+		checks[3].Hint = "run ip auth login to store tokens"
+	}
+
+	networkOK := false
+	networkDetail := "skipped (missing credentials or auth)"
+	if ckOK && csOK && authOK {
+		client, _, _, err := requireClient(opts, cfg, true, stderr)
+		if err != nil {
+			networkDetail = err.Error()
+		} else if user, err := client.VerifyCredentials(ctx); err != nil {
+			networkDetail = err.Error()
+		} else {
+			networkOK = true
+			networkDetail = fmt.Sprintf("user=%s (id=%d)", user.Username, user.UserID)
+		}
+	}
+	networkCheck := doctorCheck{
+		Name:   "network",
+		OK:     networkOK,
+		Detail: networkDetail,
+	}
+	if !networkOK {
+		networkCheck.Hint = "ensure auth is valid and api_base is reachable"
+	}
+	checks = append(checks, networkCheck)
+
+	ok := ckOK && csOK && authOK && networkOK
+	result := map[string]any{
+		"ok":            ok,
+		"config_path":   cfgPath,
+		"api_base":      opts.APIBase,
+		"timeout":       opts.Timeout.String(),
+		"retry":         opts.RetryCount,
+		"retry_backoff": opts.RetryBackoff.String(),
+		"checks":        checks,
+	}
+
+	if strings.EqualFold(opts.Format, "json") || isNDJSONFormat(opts.Format) {
+		if err := writeJSONByFormat(stdout, opts.Format, result); err != nil {
+			return printError(stderr, err)
+		}
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "ok=%t\nconfig_path=%s\napi_base=%s\ntimeout=%s\nretry=%d\nretry_backoff=%s\n",
+		ok, cfgPath, opts.APIBase, opts.Timeout.String(), opts.RetryCount, opts.RetryBackoff.String())
+	for _, check := range checks {
+		status := "ok"
+		if !check.OK {
+			status = "fail"
+		}
+		fmt.Fprintf(stdout, "%s=%s (%s)\n", check.Name, status, check.Detail)
+	}
+	return 0
+}
+
 func runSchema(args []string, opts *GlobalOptions, stdout, stderr io.Writer) int {
 	target := "bookmarks"
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
@@ -2167,9 +2298,11 @@ func printError(stderr io.Writer, err error) int {
 	if errors.As(err, &apiErr) {
 		hint := apiErrorHint(apiErr.Code)
 		exitCode := exitCodeForError(apiErr)
+		code := errorCodeForError(apiErr)
 		if stderrJSONEnabled {
 			payload := map[string]any{
 				"error":     apiErr.Error(),
+				"code":      code,
 				"api_code":  apiErr.Code,
 				"exit_code": exitCode,
 			}
@@ -2186,9 +2319,11 @@ func printError(stderr io.Writer, err error) int {
 		return exitCode
 	}
 	exitCode := exitCodeForError(err)
+	code := errorCodeForError(err)
 	if stderrJSONEnabled {
 		payload := map[string]any{
 			"error":     err.Error(),
+			"code":      code,
 			"exit_code": exitCode,
 		}
 		_ = output.WriteJSONLine(stderr, payload)
@@ -2202,6 +2337,7 @@ func printUsageError(stderr io.Writer, msg string) int {
 	if stderrJSONEnabled {
 		payload := map[string]any{
 			"error":     msg,
+			"code":      ErrCodeInvalidUsage,
 			"exit_code": 2,
 		}
 		_ = output.WriteJSONLine(stderr, payload)
@@ -2213,7 +2349,10 @@ func printUsageError(stderr io.Writer, msg string) int {
 
 func writeErrorLine(stderr io.Writer, err error) {
 	if stderrJSONEnabled {
-		_ = output.WriteJSONLine(stderr, map[string]any{"error": err.Error()})
+		_ = output.WriteJSONLine(stderr, map[string]any{
+			"error": err.Error(),
+			"code":  errorCodeForError(err),
+		})
 		return
 	}
 	fmt.Fprintf(stderr, "error: %v\n", err)
@@ -3715,6 +3854,10 @@ func usageHealth() string {
 	return "Usage:\n  ip health\n"
 }
 
+func usageDoctor() string {
+	return "Usage:\n  ip doctor\n"
+}
+
 func usageVerify() string {
 	return "Usage:\n  ip verify\n"
 }
@@ -3732,14 +3875,16 @@ func usageAgent() string {
   - Default output is NDJSON; override with --format table|plain|json if needed.
   - Use --ndjson/--jsonl for streams, --json for single objects.
   - Prefer --plain only for line-oriented, human-friendly output.
-  - Use --stderr-json for structured errors and exit codes.
+  - Use --stderr-json for structured errors, codes, and exit codes.
   - For deterministic output, avoid table mode.
+  - Run ip doctor before long workflows to validate config/auth/network.
   - Use --since/--until or --updated-since to slice lists without cursors.
   - Use --cursor-dir for automatic incremental sync files.
   - Use --ids or --stdin for bulk mutations; add --progress-json for progress events.
   - Use --select to client-filter results when API filters are missing.
 Examples:
   ip --json auth status
+  ip doctor --json
   ip list --ndjson --limit 0 --max-pages 50
   ip list --updated-since 2025-01-01T00:00:00Z
   ip list --select "starred=1,tag~news"

@@ -5,12 +5,15 @@
 - `internal/instapaper/`: Instapaper API client, types, and API tests.
 - `internal/output/`: Output formatting (table/plain/json) plus golden tests in `internal/output/testdata/`.
 - `internal/config/`, `internal/prompt/`, `internal/browser/`, `internal/oauth1/`, `internal/version/`: supporting modules.
+- `scripts/`: release helpers (`release.sh`, `update-brew-tap.sh`).
 - Assets/templates are not used in this repo.
 
 ## Build, Test, and Development Commands
 - `go build ./cmd/ip`: Build the CLI binary in the repo root.
 - `go test ./...`: Run all unit and integration tests.
 - `./ip --help`: Quick local smoke test (after build) for CLI usage.
+- `scripts/release.sh vX.Y.Z`: Tag + push release to trigger GoReleaser.
+- `scripts/update-brew-tap.sh vX.Y.Z`: Update Homebrew tap if CI cannot.
 
 ## Coding Style & Naming Conventions
 - Go code is formatted with `gofmt` (tabs, standard Go style). Run `gofmt -w` on modified `.go` files.
@@ -37,3 +40,6 @@
   ```
   https://www.instapaper.com/api
   ```
+
+## Release Notes
+- See `docs/release-checklist.md` for the GoReleaser/tag flow and Homebrew tap automation.
