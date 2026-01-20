@@ -7,7 +7,7 @@ description: "Use when operating the instapaper-cli (ip) tool or troubleshooting
 
 ## Overview
 
-Use this skill to plan and execute `ip` CLI commands for Instapaper workflows, especially when you need reliable automation, structured output, or troubleshooting guidance.
+Use this skill to handle Instapaper operations via the `ip` CLI, especially when you need reliable automation, structured output, or troubleshooting guidance.
 
 ## Workflow (fast path)
 
