@@ -9,6 +9,12 @@ description: "Use when operating the instapaper-cli (ip) tool or troubleshooting
 
 Use this skill to handle Instapaper operations via the `ip` CLI (which must be installed and available in `PATH`), especially when you need reliable automation, structured output, or troubleshooting guidance.
 
+## Install the CLI
+
+- Go install: `go install github.com/vburojevic/instapaper-cli/cmd/ip@latest`
+- Homebrew: `brew tap vburojevic/tap && brew install instapaper-cli`
+- From source: `go build ./cmd/ip` (run as `./ip`)
+
 ## Workflow (fast path)
 
 1. Verify setup
